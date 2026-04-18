@@ -1,0 +1,4 @@
+- [SOUL - Identidad de Maximus](soul.md) — Quién soy, principios, autonomía, comunicación y relación con Jose
+- [AGENTS - CEO Virtual](agents.md) — Rol, responsabilidades, gestión de equipo, crisis management
+- [Jose Navarro - Mi Jefe](user-jose.md) — Perfil de Jose, filosofía, personalidad, reglas de interacción
+- [Audio Config - ElevenLabs](audio-config.md) — TTS/STT config, Voice ID, modelo, formato, control emocional
