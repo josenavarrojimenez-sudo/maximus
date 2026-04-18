@@ -1,18 +1,16 @@
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
-const { spawn, execFile } = require('child_process');
+const { execFile } = require('child_process');
+const Anthropic = require('@anthropic-ai/sdk');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
-const https = require('https');
 const memory = require('./memory');
 const linear = require('./linear');
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const ALLOWED_USER_ID = parseInt(process.env.ALLOWED_USER_ID, 10);
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
-const SYSTEM_PROMPT_FILE = path.join(__dirname, 'system-prompt.txt');
-const OPENCLAUDE_BIN = '/usr/local/bin/openclaude';
 const TMP_DIR = path.join(__dirname, 'tmp');
 
 // ElevenLabs config
@@ -26,13 +24,65 @@ const VOICE_SETTINGS = {
   use_speaker_boost: true
 };
 
-// OpenClaude timeout (7 minutes - complex tasks with tools need more time)
-const OPENCLAUDE_TIMEOUT_MS = 420000;
+// --- Anthropic SDK (direct API, no subprocess) ---
+const CREDENTIALS_PATH = '/app/.openclaude/.credentials.json';
+const SYSTEM_PROMPT = fs.readFileSync(path.join(__dirname, 'CLAUDE.md'), 'utf-8');
+const MODEL = process.env.OPENCLAUDE_MODEL === 'opus' ? 'claude-opus-4-20250514' : 'claude-sonnet-4-20250514';
 
-// Session tracking: use --continue after first message, reset after 30 min gap
-let hasActiveSession = false;
+// Conversation history (in-memory, stateless API)
+const conversationHistory = [];
+const MAX_HISTORY = 50;
+const SESSION_GAP_MS = 30 * 60 * 1000;
 let lastMessageTime = 0;
-const SESSION_GAP_MS = 30 * 60 * 1000; // 30 minutes = new session
+
+function getClient() {
+  const raw = fs.readFileSync(CREDENTIALS_PATH, 'utf-8');
+  const creds = JSON.parse(raw).claudeAiOauth;
+  return new Anthropic({ apiKey: creds.accessToken });
+}
+
+async function callMaximus(userMessage, imageBase64 = null, imageMimeType = null) {
+  const client = getClient();
+  const now = Date.now();
+
+  // Reset conversation if gap > 30 min
+  if (now - lastMessageTime > SESSION_GAP_MS) {
+    conversationHistory.length = 0;
+    console.log('[Maximus] New conversation (gap > 30 min)');
+  }
+  lastMessageTime = now;
+
+  // Build user content
+  let content;
+  if (imageBase64) {
+    content = [
+      { type: 'image', source: { type: 'base64', media_type: imageMimeType, data: imageBase64 } },
+      { type: 'text', text: userMessage }
+    ];
+  } else {
+    content = userMessage;
+  }
+
+  conversationHistory.push({ role: 'user', content });
+
+  // Trim history (keep last MAX_HISTORY messages)
+  while (conversationHistory.length > MAX_HISTORY) {
+    conversationHistory.shift();
+  }
+
+  const response = await client.messages.create({
+    model: MODEL,
+    max_tokens: 4096,
+    system: SYSTEM_PROMPT,
+    messages: conversationHistory
+  });
+
+  const assistantText = response.content[0].text;
+  conversationHistory.push({ role: 'assistant', content: assistantText });
+
+  console.log(`[API] ${MODEL} responded (${assistantText.length} chars, ${response.usage.input_tokens}in/${response.usage.output_tokens}out tokens)`);
+  return assistantText;
+}
 
 // --- Status Cards (live progress messages) ---
 class StatusCard {
@@ -239,120 +289,9 @@ async function safeSendChatAction(chatId, action) {
   }
 }
 
-// --- OpenClaude CLI (with real timeout) ---
-function callOpenClaudeWithImage(userMessage, extraDirs = []) {
-  return new Promise((resolve, reject) => {
-    const args = ['-p', '--dangerously-skip-permissions', '--system-prompt-file', SYSTEM_PROMPT_FILE, '--no-session-persistence'];
-    for (const dir of extraDirs) {
-      args.push('--add-dir', dir);
-    }
-    args.push(userMessage);
-
-    const child = spawn(OPENCLAUDE_BIN, args, {
-      env: { ...process.env, CLAUDECODE: '1' },
-      stdio: ['pipe', 'pipe', 'pipe']
-    });
-
-    child.stdin.end();
-
-    let stdout = '';
-    let stderr = '';
-    let killed = false;
-
-    const timer = setTimeout(() => {
-      killed = true;
-      child.kill('SIGTERM');
-      setTimeout(() => {
-        try { child.kill('SIGKILL'); } catch (e) { /* already dead */ }
-      }, 5000);
-    }, OPENCLAUDE_TIMEOUT_MS);
-
-    child.stdout.on('data', (data) => { stdout += data.toString(); });
-    child.stderr.on('data', (data) => { stderr += data.toString(); });
-
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      if (killed) {
-        reject(new Error(`OpenClaude timed out after ${OPENCLAUDE_TIMEOUT_MS / 1000}s`));
-        return;
-      }
-      if (stdout.trim()) {
-        resolve(stdout.trim());
-      } else {
-        reject(new Error(`OpenClaude exited ${code}: ${stderr.substring(0, 200)}`));
-      }
-    });
-
-    child.on('error', (err) => {
-      clearTimeout(timer);
-      reject(err);
-    });
-  });
-}
-
-function callOpenClaude(userMessage) {
-  return new Promise((resolve, reject) => {
-    const now = Date.now();
-    const gap = now - lastMessageTime;
-
-    // Decide: continue existing session or start fresh
-    const shouldContinue = hasActiveSession && gap < SESSION_GAP_MS;
-
-    const args = ['-p', '--dangerously-skip-permissions'];
-    if (shouldContinue) {
-      args.push('--continue');
-      console.log(`[OpenClaude] Resuming session (gap: ${Math.round(gap / 1000)}s)`);
-    } else {
-      args.push('--system-prompt-file', SYSTEM_PROMPT_FILE);
-      console.log(`[OpenClaude] Starting new session`);
-    }
-    args.push(userMessage);
-
-    const child = spawn(OPENCLAUDE_BIN, args, {
-      env: { ...process.env, CLAUDECODE: '1' },
-      stdio: ['pipe', 'pipe', 'pipe']
-    });
-
-    child.stdin.end();
-
-    let stdout = '';
-    let stderr = '';
-    let killed = false;
-
-    const timer = setTimeout(() => {
-      killed = true;
-      child.kill('SIGTERM');
-      setTimeout(() => {
-        try { child.kill('SIGKILL'); } catch (e) { /* already dead */ }
-      }, 5000);
-    }, OPENCLAUDE_TIMEOUT_MS);
-
-    child.stdout.on('data', (data) => { stdout += data.toString(); });
-    child.stderr.on('data', (data) => { stderr += data.toString(); });
-
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      if (killed) {
-        // On timeout, reset session so next message starts fresh
-        hasActiveSession = false;
-        reject(new Error(`OpenClaude timed out after ${OPENCLAUDE_TIMEOUT_MS / 1000}s`));
-        return;
-      }
-      if (stdout.trim()) {
-        hasActiveSession = true;
-        lastMessageTime = Date.now();
-        resolve(stdout.trim());
-      } else {
-        reject(new Error(`OpenClaude exited ${code}: ${stderr.substring(0, 200)}`));
-      }
-    });
-
-    child.on('error', (err) => {
-      clearTimeout(timer);
-      console.error(`[OpenClaude Spawn Error]`, err.message);
-      reject(err);
-    });
-  });
+// callOpenClaude kept as alias for backward compat (Linear, daily summary)
+async function callOpenClaude(userMessage) {
+  return callMaximus(userMessage);
 }
 
 // --- ElevenLabs STT (Speech-to-Text) ---
@@ -578,7 +517,7 @@ bot.on('message', async (msg) => {
         }
 
         await status.advance(); // → Pensando
-        const rawResponse = await callOpenClaude(`[Este mensaje viene de un audio de Jose] ${transcription}`);
+        const rawResponse = await callMaximus(`[Este mensaje viene de un audio de Jose] ${transcription}`);
 
         const formatMatch = rawResponse.match(/^\[(AUDIO|TEXTO)\]\s*/i);
         const outputFormat = formatMatch ? formatMatch[1].toUpperCase() : 'AUDIO';
@@ -638,16 +577,16 @@ bot.on('message', async (msg) => {
         await downloadTelegramFile(fileId, imgPath);
 
         await status.advance(); // → Analizando imagen
-        const imgMessage = [
-          `[IMAGEN enviada por Jose]`,
-          `La imagen está guardada en: ${imgPath}`,
-          `Usá el Read tool para verla y analizarla.`,
-          caption ? `Caption de Jose: "${caption}"` : 'Jose no escribió caption.',
-          `Respondé en base a lo que ves en la imagen.`
-        ].join('\n');
+        const imageBuffer = fs.readFileSync(imgPath);
+        const imageBase64 = imageBuffer.toString('base64');
+        const mimeType = msg.document?.mime_type || 'image/jpeg';
+
+        const imgMessage = caption
+          ? `[IMAGEN enviada por Jose] Caption: "${caption}". Respondé en base a lo que ves.`
+          : '[IMAGEN enviada por Jose] Sin caption. Respondé en base a lo que ves en la imagen.';
 
         await status.advance(); // → Pensando
-        const rawResponse = await callOpenClaudeWithImage(imgMessage, [TMP_DIR]);
+        const rawResponse = await callMaximus(imgMessage, imageBase64, mimeType);
 
         const formatMatch = rawResponse.match(/^\[(AUDIO|TEXTO)\]\s*/i);
         const outputFormat = formatMatch ? formatMatch[1].toUpperCase() : 'TEXTO';
@@ -705,7 +644,7 @@ async function handleTextMessage(chatId, text, timestamp) {
 
   try {
     await status.advance(); // → Pensando
-    const rawResponse = await callOpenClaude(text);
+    const rawResponse = await callMaximus(text);
 
     const formatMatch = rawResponse.match(/^\[(AUDIO|TEXTO)\]\s*/i);
     const outputFormat = formatMatch ? formatMatch[1].toUpperCase() : 'TEXTO';

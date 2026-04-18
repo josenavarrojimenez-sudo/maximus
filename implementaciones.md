@@ -4,6 +4,33 @@ Registro de features implementadas, cambios arquitecturales y fixes.
 
 ---
 
+## 2026-04-18 - Migracion a Anthropic SDK directo (eliminacion de OpenClaude CLI)
+
+### Problema
+El bot usaba OpenClaude CLI como subprocess (`openclaude -p`) para generar respuestas. Esto causaba problemas constantes:
+- Timeouts (stdin cerrado, permisos de tools sin confirmar)
+- Token OAuth expiraba y el subprocess no podia refrescar
+- Overhead de proceso: spawn + subprocess + kill por cada mensaje
+- `--dangerously-skip-permissions` como parche temporal
+
+### Solucion
+- Reemplazo completo de subprocess por `@anthropic-ai/sdk` (SDK oficial de Anthropic)
+- OAuth token (`sk-ant-oat01-...`) de la suscripcion Max funciona directamente con el SDK
+- Conversacion manejada como array de mensajes en memoria (stateless API)
+- CLAUDE.md se lee como system prompt nativo
+- Token se relee del archivo en cada llamada (montado read-write)
+- Sin OpenClaude CLI en el Dockerfile (imagen mas liviana)
+
+### Archivos modificados
+- `bot.js` — callMaximus() reemplaza callOpenClaude(), sin spawn/subprocess
+- `package.json` — Agregado `@anthropic-ai/sdk`
+- `Dockerfile` — Quitado `npm install -g @gitlawb/openclaude` y `openssh-client`
+
+### Que se mantuvo intacto
+- ElevenLabs TTS/STT, Status Cards, cola + batching, memoria, Linear, daily summary
+
+---
+
 ## 2026-04-18 - Audio inteligente (analiza contenido antes de responder)
 
 ### Problema
