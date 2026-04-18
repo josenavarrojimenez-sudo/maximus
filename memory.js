@@ -348,7 +348,13 @@ function needsSummary(dateStr) {
   return count && count.cnt > 0;
 }
 
+/** Expone la instancia de DB para módulos externos (ej: linear.js) */
+function getDb() {
+  return db;
+}
+
 module.exports = {
   init, buildContext, saveExchange, extractAndSaveMemories,
-  searchRelevantHistory, buildSummaryPrompt, saveDailySummary, needsSummary
+  searchRelevantHistory, buildSummaryPrompt, saveDailySummary, needsSummary,
+  getDb
 };

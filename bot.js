@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const memory = require('./memory');
+const linear = require('./linear');
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const ALLOWED_USER_ID = parseInt(process.env.ALLOWED_USER_ID, 10);
@@ -489,6 +490,21 @@ async function runDailySummary() {
 
 // Start the daily summary cron
 scheduleDailySummary();
+
+// ─── Linear Integration ───────────────────────────────────────
+linear.start({
+  apiKey: process.env.LINEAR_API_KEY,
+  db: memory.getDb(),
+  callOpenClaude,
+  notifyJose: async (text) => {
+    // En chats privados de Telegram, chatId === userId
+    const chatId = process.env.JOSE_CHAT_ID || ALLOWED_USER_ID;
+    if (!chatId) return;
+    await bot.sendMessage(chatId, text, { parse_mode: 'Markdown' }).catch(() => {
+      bot.sendMessage(chatId, text); // fallback sin markdown
+    });
+  }
+});
 
 bot.on('polling_error', (error) => {
   console.error(`[Polling Error]`, error.message);

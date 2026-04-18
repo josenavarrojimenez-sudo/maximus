@@ -9,6 +9,8 @@ Telegram <-> bot.js <-> OpenClaude CLI (subprocess)
                 |
                 +-> memory.js <-> SQLite + Markdown files
                 |
+                +-> linear.js <-> Linear API (polling cada 2 min)
+                |
                 +-> ElevenLabs API (TTS/STT)
                 |
                 +-> FFmpeg (audio processing)
@@ -24,6 +26,14 @@ Telegram <-> bot.js <-> OpenClaude CLI (subprocess)
 - Cola de mensajes secuencial (1 a la vez)
 - Timeout real de 5 min para OpenClaude
 - Rate limit handling para Telegram API
+
+### Linear Integration
+- **Polling cada 2 minutos** — busca issues con label `maximus` que no estén completados
+- **Ejecución autónoma** — Maximus procesa el issue con OpenClaude y lo ejecuta
+- **Comentario automático** — el resultado se publica como comentario en el issue
+- **Notificación a Jose** — avisa por Telegram al iniciar y al completar
+- **Issue → Done** — mueve el issue a estado completado automáticamente
+- **Tracking en SQLite** — no procesa el mismo issue dos veces
 
 ### Sistema de Memoria Persistente
 - **SQLite** para episodios/conversaciones crudas (cada mensaje guardado inmediatamente)
@@ -62,6 +72,7 @@ Despues de responder:
 - OpenClaude credentials (`~/.openclaude/.credentials.json`)
 - Telegram Bot Token (via @BotFather)
 - ElevenLabs API Key
+- Linear API Key (opcional, para integración con Linear)
 
 ### Instalacion
 
@@ -101,8 +112,9 @@ docker logs maximus-telegram --tail 50 -f
 
 ```
 maximus/
-  bot.js              # Bot principal (Telegram + OpenClaude + audio)
+  bot.js              # Bot principal (Telegram + OpenClaude + audio + Linear)
   memory.js           # Sistema de memoria (SQLite + Markdown)
+  linear.js           # Integración con Linear (polling + ejecución autónoma)
   system-prompt.txt   # Personalidad de Maximus
   Dockerfile          # Imagen Docker
   docker-compose.yml  # Orquestacion
