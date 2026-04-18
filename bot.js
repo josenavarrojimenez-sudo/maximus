@@ -298,7 +298,7 @@ function callOpenClaude(userMessage) {
     // Decide: continue existing session or start fresh
     const shouldContinue = hasActiveSession && gap < SESSION_GAP_MS;
 
-    const args = ['-p', '--tools', ''];
+    const args = ['-p'];
     if (shouldContinue) {
       args.push('--continue');
       console.log(`[OpenClaude] Resuming session (gap: ${Math.round(gap / 1000)}s)`);
