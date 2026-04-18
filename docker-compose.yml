@@ -5,8 +5,9 @@ services:
     restart: always
     env_file:
       - .env
+    user: "999:999"
     volumes:
-      - /root/.openclaude/.credentials.json:/root/.openclaude/.credentials.json:ro
+      - /root/.openclaude/.credentials.json:/app/.openclaude/.credentials.json
       - /root/maximus-data:/app/data
     tmpfs:
-      - /app/tmp
+      - /app/tmp:uid=999,gid=999

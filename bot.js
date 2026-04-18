@@ -29,6 +29,83 @@ const VOICE_SETTINGS = {
 // OpenClaude timeout (5 minutes - long messages need more time)
 const OPENCLAUDE_TIMEOUT_MS = 300000;
 
+// --- Status Cards (live progress messages) ---
+class StatusCard {
+  constructor(bot, chatId) {
+    this.bot = bot;
+    this.chatId = chatId;
+    this.messageId = null;
+    this.steps = [];
+    this.currentStep = -1;
+  }
+
+  async init(steps) {
+    this.steps = steps.map(s => ({ emoji: s[0], label: s[1], status: 'pending' }));
+    this.currentStep = 0;
+    this.steps[0].status = 'active';
+    const msg = await this.bot.sendMessage(this.chatId, this._render(), { parse_mode: 'HTML' });
+    this.messageId = msg.message_id;
+  }
+
+  async advance() {
+    if (this.currentStep >= 0 && this.currentStep < this.steps.length) {
+      this.steps[this.currentStep].status = 'done';
+    }
+    this.currentStep++;
+    if (this.currentStep < this.steps.length) {
+      this.steps[this.currentStep].status = 'active';
+      await this._update();
+    }
+  }
+
+  async complete() {
+    // Mark all remaining as done
+    for (const s of this.steps) { if (s.status !== 'done') s.status = 'done'; }
+    try {
+      if (this.messageId) {
+        await this.bot.deleteMessage(this.chatId, this.messageId);
+      }
+    } catch (e) { /* message already deleted or too old */ }
+  }
+
+  async fail(errorMsg) {
+    if (this.currentStep >= 0 && this.currentStep < this.steps.length) {
+      this.steps[this.currentStep].status = 'fail';
+    }
+    try {
+      if (this.messageId) {
+        await this._update();
+        // Leave error visible for 5 seconds then delete
+        setTimeout(async () => {
+          try { await this.bot.deleteMessage(this.chatId, this.messageId); } catch (e) {}
+        }, 5000);
+      }
+    } catch (e) {}
+  }
+
+  _render() {
+    const icons = { pending: '⏳', active: '⚡', done: '✅', fail: '❌' };
+    const lines = this.steps.map(s => {
+      const icon = icons[s.status];
+      const style = s.status === 'active' ? `<b>${s.label}</b>` : s.label;
+      return `${icon} ${s.emoji} ${style}`;
+    });
+    return lines.join('\n');
+  }
+
+  async _update() {
+    try {
+      if (this.messageId) {
+        await this.bot.editMessageText(this._render(), {
+          chat_id: this.chatId,
+          message_id: this.messageId,
+          parse_mode: 'HTML'
+        });
+      }
+    } catch (e) { /* message not modified or deleted */ }
+  }
+}
+
 const bot = new TelegramBot(TOKEN, { polling: true });
 
 // Initialize persistent memory system
@@ -384,10 +461,13 @@ bot.on('message', async (msg) => {
       const fileId = (msg.voice || msg.audio).file_id;
       console.log(`[Jose] Audio recibido`);
 
-      safeSendChatAction(chatId, 'record_voice');
-      const typingInterval = setInterval(() => {
-        safeSendChatAction(chatId, 'record_voice');
-      }, 5000);
+      const status = new StatusCard(bot, chatId);
+      await status.init([
+        ['🎙️', 'Descargando audio'],
+        ['📝', 'Transcribiendo'],
+        ['🧠', 'Pensando'],
+        ['🔊', 'Generando respuesta'],
+      ]);
 
       const inputAudio = path.join(TMP_DIR, `input_${timestamp}.oga`);
       const ttsRaw = path.join(TMP_DIR, `tts_raw_${timestamp}.ogg`);
@@ -396,14 +476,16 @@ bot.on('message', async (msg) => {
       try {
         await downloadTelegramFile(fileId, inputAudio);
 
+        await status.advance(); // → Transcribiendo
         const transcription = await transcribeAudio(inputAudio);
         if (!transcription || transcription.trim().length === 0) {
-          clearInterval(typingInterval);
+          await status.fail();
           bot.sendMessage(chatId, 'Mae, no logré entender el audio. ¿Podés repetirlo?');
           cleanup(inputAudio);
           return;
         }
 
+        await status.advance(); // → Pensando
         const context = memory.buildContext();
         const enrichedMessage = context ? `${context}\n\n[Este mensaje viene de un audio de Jose] ${transcription}` : `[Este mensaje viene de un audio de Jose] ${transcription}`;
         const rawResponse = await callOpenClaude(enrichedMessage);
@@ -412,17 +494,18 @@ bot.on('message', async (msg) => {
         const outputFormat = formatMatch ? formatMatch[1].toUpperCase() : 'AUDIO';
         let responseText = rawResponse.replace(/^\[(AUDIO|TEXTO)\]\s*/i, '').trim();
 
-        // Extract self-memories before sending to user
         try { responseText = memory.extractAndSaveMemories(responseText); } catch (memErr) { console.error('[Memory Extract Error]', memErr.message); }
 
-        clearInterval(typingInterval);
+        await status.advance(); // → Generando respuesta
 
         if (outputFormat === 'TEXTO') {
+          await status.complete();
           await sendTextResponse(chatId, responseText);
           console.log(`[Maximus] Respuesta de audio transcrita -> texto enviado (${responseText.length} chars)`);
         } else {
           await textToSpeech(responseText, ttsRaw);
           await boostVolume(ttsRaw, ttsBoosted);
+          await status.complete();
           await bot.sendVoice(chatId, ttsBoosted);
           console.log(`[Maximus] Voice note enviada`);
         }
@@ -430,7 +513,7 @@ bot.on('message', async (msg) => {
         try { memory.saveExchange(transcription, responseText); } catch (memErr) { console.error('[Memory Error]', memErr.message); }
 
       } catch (err) {
-        clearInterval(typingInterval);
+        await status.fail(err.message);
         console.error(`[Audio Error]`, err.message);
         bot.sendMessage(chatId, 'Mae, tuve un problema con el audio. Intentá de nuevo.');
       } finally {
@@ -445,23 +528,26 @@ bot.on('message', async (msg) => {
       const caption = msg.caption || '';
       console.log(`[Jose] Imagen recibida. Caption: "${caption}"`);
 
-      safeSendChatAction(chatId, 'typing');
-      const typingInterval = setInterval(() => {
-        safeSendChatAction(chatId, 'typing');
-      }, 5000);
+      const status = new StatusCard(bot, chatId);
+      await status.init([
+        ['📸', 'Descargando imagen'],
+        ['👁️', 'Analizando imagen'],
+        ['🧠', 'Pensando'],
+        ['💬', 'Preparando respuesta'],
+      ]);
 
       const imgPath = path.join(TMP_DIR, `telegram_img_${timestamp}.jpg`);
       const ttsRaw = path.join(TMP_DIR, `tts_raw_${timestamp}.ogg`);
       const ttsBoosted = path.join(TMP_DIR, `tts_boost_${timestamp}.ogg`);
 
       try {
-        // Get highest resolution photo
         const fileId = msg.photo
           ? msg.photo[msg.photo.length - 1].file_id
           : msg.document.file_id;
 
         await downloadTelegramFile(fileId, imgPath);
 
+        await status.advance(); // → Analizando imagen
         const context = memory.buildContext();
         const imgMessage = [
           context || '',
@@ -472,9 +558,8 @@ bot.on('message', async (msg) => {
           `\nRespondé en base a lo que ves en la imagen.`
         ].filter(Boolean).join('\n');
 
+        await status.advance(); // → Pensando
         const rawResponse = await callOpenClaudeWithImage(imgMessage, [TMP_DIR]);
-
-        clearInterval(typingInterval);
 
         const formatMatch = rawResponse.match(/^\[(AUDIO|TEXTO)\]\s*/i);
         const outputFormat = formatMatch ? formatMatch[1].toUpperCase() : 'TEXTO';
@@ -482,12 +567,16 @@ bot.on('message', async (msg) => {
 
         try { responseText = memory.extractAndSaveMemories(responseText); } catch (memErr) { console.error('[Memory Extract Error]', memErr.message); }
 
+        await status.advance(); // → Preparando respuesta
+
         if (outputFormat === 'AUDIO') {
           await textToSpeech(responseText, ttsRaw);
           await boostVolume(ttsRaw, ttsBoosted);
+          await status.complete();
           await bot.sendVoice(chatId, ttsBoosted);
           console.log(`[Maximus] Voice note enviada (imagen)`);
         } else {
+          await status.complete();
           await sendTextResponse(chatId, responseText);
           console.log(`[Maximus] Texto enviado (imagen ${responseText.length} chars)`);
         }
@@ -496,7 +585,7 @@ bot.on('message', async (msg) => {
         try { memory.saveExchange(saveText, responseText); } catch (memErr) { console.error('[Memory Error]', memErr.message); }
 
       } catch (err) {
-        clearInterval(typingInterval);
+        await status.fail(err.message);
         console.error(`[Image Error]`, err.message);
         bot.sendMessage(chatId, 'Mae, tuve un problema procesando la imagen. Intentá de nuevo.');
       } finally {
@@ -511,40 +600,45 @@ bot.on('message', async (msg) => {
 
     console.log(`[Jose] ${text}`);
 
-    safeSendChatAction(chatId, 'typing');
-    const typingInterval = setInterval(() => {
-      safeSendChatAction(chatId, 'typing');
-    }, 5000);
+    const status = new StatusCard(bot, chatId);
+    await status.init([
+      ['📨', 'Recibido'],
+      ['🧠', 'Pensando'],
+      ['💬', 'Preparando respuesta'],
+    ]);
 
     const ttsRaw = path.join(TMP_DIR, `tts_raw_${timestamp}.ogg`);
     const ttsBoosted = path.join(TMP_DIR, `tts_boost_${timestamp}.ogg`);
 
     try {
+      await status.advance(); // → Pensando
       const context = memory.buildContext();
       const enrichedMessage = context ? `${context}\n\n[Este mensaje viene de texto de Jose] ${text}` : `[Este mensaje viene de texto de Jose] ${text}`;
       const rawResponse = await callOpenClaude(enrichedMessage);
-      clearInterval(typingInterval);
 
       const formatMatch = rawResponse.match(/^\[(AUDIO|TEXTO)\]\s*/i);
       const outputFormat = formatMatch ? formatMatch[1].toUpperCase() : 'TEXTO';
       let responseText = rawResponse.replace(/^\[(AUDIO|TEXTO)\]\s*/i, '').trim();
 
-      // Extract self-memories before sending to user
       try { responseText = memory.extractAndSaveMemories(responseText); } catch (memErr) { console.error('[Memory Extract Error]', memErr.message); }
+
+      await status.advance(); // → Preparando respuesta
 
       if (outputFormat === 'AUDIO') {
         await textToSpeech(responseText, ttsRaw);
         await boostVolume(ttsRaw, ttsBoosted);
+        await status.complete();
         await bot.sendVoice(chatId, ttsBoosted);
         console.log(`[Maximus] Voice note enviada (desde texto)`);
       } else {
+        await status.complete();
         await sendTextResponse(chatId, responseText);
         console.log(`[Maximus] Respuesta enviada (${responseText.length} chars)`);
       }
 
       try { memory.saveExchange(text, responseText); } catch (memErr) { console.error('[Memory Error]', memErr.message); }
     } catch (err) {
-      clearInterval(typingInterval);
+      await status.fail(err.message);
       console.error(`[Error]`, err.message);
       bot.sendMessage(chatId, 'Mae, tuve un problema procesando tu mensaje. Intentá de nuevo en un momento.');
     } finally {
