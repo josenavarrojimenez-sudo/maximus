@@ -9,8 +9,7 @@ const MEMORY_DIR = path.join(DATA_DIR, 'memory');
 
 const DIRS = ['canon', 'journal', 'user', 'decisions', 'project', 'inbox', 'inbox/archived'];
 const CONVERSATION_GAP_MS = 30 * 60 * 1000; // 30 minutes
-const MAX_RECENT_MESSAGES = 20;
-const MAX_CONTEXT_CHARS = 8000;
+const MAX_RECENT_MESSAGES = 50; // Sin límite artificial duro — el LLM maneja su context window
 
 let db = null;
 let currentConversationId = null;
@@ -94,27 +93,36 @@ function readMarkdownDir(dirName) {
 // --- FTS5 search for relevant past conversations ---
 function searchRelevantHistory(query, limit = 5) {
   try {
-    // Simple keyword extraction: take significant words from the query
-    const keywords = query
+    // Simple keyword extraction
+    const words = query
       .replace(/[^\w\sáéíóúñ]/gi, '')
       .split(/\s+/)
       .filter(w => w.length > 3)
-      .slice(0, 5)
-      .join(' OR ');
+      .slice(0, 5);
 
-    if (!keywords) return [];
+    if (!words.length) return [];
 
-    // Search in messages directly using LIKE (more reliable than FTS for our case)
+    // 1. Try FTS5 first (fast, accurate)
+    try {
+      const ftsQuery = words.join(' OR ');
+      const ftsResults = db.prepare(`
+        SELECT source, path, content, tags FROM memory_search
+        WHERE memory_search MATCH ?
+        ORDER BY rank LIMIT ?
+      `).all(ftsQuery, limit);
+
+      if (ftsResults.length > 0) return ftsResults;
+    } catch (ftsErr) {
+      // FTS5 not available or error — fall through to LIKE
+    }
+
+    // 2. Fallback: LIKE search in messages
+    const keyword = words[0];
     const results = db.prepare(`
       SELECT role, content, timestamp FROM messages
-      WHERE content LIKE ? OR content LIKE ? OR content LIKE ?
+      WHERE content LIKE ?
       ORDER BY timestamp DESC LIMIT ?
-    `).all(
-      `%${keywords.split(' OR ')[0]}%`,
-      `%${keywords.split(' OR ')[1] || keywords.split(' OR ')[0]}%`,
-      `%${keywords.split(' OR ')[2] || keywords.split(' OR ')[0]}%`,
-      limit
-    );
+    `).all(`%${keyword}%`, limit);
 
     return results;
   } catch (e) {
@@ -181,14 +189,8 @@ function buildContext() {
     parts.push(`=== RECUERDOS PENDIENTES (inbox) ===\n${inbox}`);
   }
 
-  let context = parts.join('\n\n');
-
-  // Truncate if too long
-  if (context.length > MAX_CONTEXT_CHARS) {
-    context = context.substring(0, MAX_CONTEXT_CHARS) + '\n[... contexto truncado por espacio ...]';
-  }
-
-  return context;
+  // Sin truncado: el LLM (Sonnet/Opus) maneja su propio context window
+  return parts.join('\n\n');
 }
 
 // --- Self-write: parse [REMEMBER] blocks from Maximus responses ---
@@ -244,6 +246,12 @@ function saveExchange(userMessage, response) {
   const insert = db.prepare('INSERT INTO messages (conversation_id, role, content, timestamp) VALUES (?, ?, ?, ?)');
   insert.run(currentConversationId, 'user', userMessage, timestamp);
   insert.run(currentConversationId, 'assistant', response, timestamp);
+
+  // Index in FTS5 for semantic search
+  try {
+    const ftsInsert = db.prepare('INSERT INTO memory_search (source, path, content, tags) VALUES (?, ?, ?, ?)');
+    ftsInsert.run('messages', `conversation:${currentConversationId}`, `Jose: ${userMessage}\nMaximus: ${response}`, '');
+  } catch (e) { /* FTS5 unavailable, skip */ }
 
   // Append to daily journal
   const dateStr = now.toISOString().split('T')[0];

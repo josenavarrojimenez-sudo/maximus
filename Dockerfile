@@ -15,6 +15,8 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
 COPY bot.js memory.js system-prompt.txt ./
+COPY identity/ identity/
+COPY memory-seed/ memory-seed/
 
 RUN mkdir -p /app/tmp
 
