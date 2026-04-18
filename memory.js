@@ -142,7 +142,7 @@ function buildContext() {
     const history = recentMessages.map(m => {
       const time = new Date(m.timestamp).toLocaleTimeString('es-CR', { hour: '2-digit', minute: '2-digit' });
       const name = m.role === 'user' ? 'Jose' : 'Maximus';
-      const content = m.content.length > 500 ? m.content.substring(0, 500) + '...' : m.content;
+      const content = m.content.length > 1000 ? m.content.substring(0, 1000) + '...' : m.content;
       return `[${time}] ${name}: ${content}`;
     }).join('\n');
     parts.push(`=== HISTORIAL RECIENTE ===\n${history}`);
