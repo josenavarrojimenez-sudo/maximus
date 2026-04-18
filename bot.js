@@ -242,7 +242,7 @@ async function safeSendChatAction(chatId, action) {
 // --- OpenClaude CLI (with real timeout) ---
 function callOpenClaudeWithImage(userMessage, extraDirs = []) {
   return new Promise((resolve, reject) => {
-    const args = ['-p', '--system-prompt-file', SYSTEM_PROMPT_FILE, '--no-session-persistence'];
+    const args = ['-p', '--tools', 'Read', '--system-prompt-file', SYSTEM_PROMPT_FILE, '--no-session-persistence'];
     for (const dir of extraDirs) {
       args.push('--add-dir', dir);
     }
@@ -298,7 +298,7 @@ function callOpenClaude(userMessage) {
     // Decide: continue existing session or start fresh
     const shouldContinue = hasActiveSession && gap < SESSION_GAP_MS;
 
-    const args = ['-p'];
+    const args = ['-p', '--tools', ''];
     if (shouldContinue) {
       args.push('--continue');
       console.log(`[OpenClaude] Resuming session (gap: ${Math.round(gap / 1000)}s)`);
