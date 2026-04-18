@@ -4,6 +4,19 @@ Registro de features implementadas, cambios arquitecturales y fixes.
 
 ---
 
+## 2026-04-18 - Cola inteligente + Batching de mensajes
+
+### Cambios
+1. **Cola limitada a 5** — Si la cola se llena, descarta el mensaje más viejo
+2. **Drop de mensajes stale** — Mensajes que esperan >5 minutos se descartan automáticamente
+3. **Batching de texto (ventana 2s)** — Mensajes de texto consecutivos se agrupan en uno solo antes de llamar a OpenClaude (ahorra tokens y da mejor respuesta)
+4. **Modelo y effort via .env** — Verificado que `OPENCLAUDE_MODEL` y `OPENCLAUDE_EFFORT` se pasan correctamente al proceso via `process.env`
+
+### Archivos modificados
+- `bot.js` — Queue con MAX_QUEUE_SIZE=5, MAX_QUEUE_AGE_MS=5min, enqueueBatchedText() con ventana 2s, handleTextMessage() extraído como función
+
+---
+
 ## 2026-04-18 - Migración a OpenClaude Nativo (Sesiones Persistentes)
 
 ### Problema
@@ -25,20 +38,30 @@ El bot spawneaba un proceso nuevo de `openclaude -p --no-session-persistence` pa
 5. **Sesiones persistentes** — Volume mount `/root/maximus-sessions:/app/.claude` para que sesiones sobrevivan rebuilds
 6. **Gap de 30 minutos** — Después de 30 min sin mensajes, inicia sesión nueva automáticamente
 7. **Timeout reducido** — De 300s a 180s
-8. **Contexto reducido** — 10 mensajes × 500 chars (backup para daily summary)
 
 ### Archivos modificados
 - `bot.js` — callOpenClaude() con --continue, sin context injection
-- `memory.js` — Reducido MAX_RECENT_MESSAGES=10, truncation=500, sin journal/inbox en contexto
+- `memory.js` — Reducido para daily summary cron solamente
 - `system-prompt.txt` — Reglas operativas corregidas (modo conversación)
 - `CLAUDE.md` — NUEVO, identidad nativa de Maximus
 - `docker-compose.yml` — Volume mount para sesiones persistentes
 
-### Resultado esperado
-- Respuestas en <15 segundos (vs 30-60s antes)
-- Sin timeouts por loops de tools
-- Contexto manejado por OpenClaude nativamente
-- Continuidad de conversación entre mensajes
+---
+
+## Hallazgos de auditoría (2026-04-18)
+
+Maximus revisó el repo y encontró items no implementados. Estado:
+
+| # | Item | Estado |
+|---|------|--------|
+| 1 | Cola con límite 5 y drop >5min | IMPLEMENTADO |
+| 2 | Batching de textos (ventana 2s) | IMPLEMENTADO |
+| 3 | Modelo y effort via .env | VERIFICADO (ya funcionaba) |
+| 4 | Contexto completo sin truncado | NO APLICA — migrado a OpenClaude nativo |
+| 5 | Journal del día en contexto | NO APLICA — OpenClaude maneja su propio contexto |
+| 6 | Inbox pendiente en contexto | NO APLICA — OpenClaude maneja su propio contexto |
+| 7 | Webhook CI/CD | PENDIENTE — Maximus va a implementar |
+| 8 | Items inbox sin consolidar | PENDIENTE — Maximus va a procesar |
 
 ---
 
@@ -50,6 +73,6 @@ El bot spawneaba un proceso nuevo de `openclaude -p --no-session-persistence` pa
 - **Audio bidireccional** — ElevenLabs TTS/STT con chunking y volume boost (Voice ID: 7MbkkemMzdIlG5LyIhul, modelo eleven_v3)
 - **Memoria persistente** — SQLite + Markdown (episodica, journal, canon, preferencias)
 - **Auto-memoria** — Bloques [REMEMBER] procesados automaticamente
-- **Cola de mensajes** — Procesamiento secuencial anti-race-condition
+- **Cola de mensajes** — Procesamiento secuencial con límite 5, drop stale, batching 2s
 - **Daily Summary** — Cron 11:59 PM con journal ejecutivo
 - **Linear integration** — Modulo listo, falta API key
