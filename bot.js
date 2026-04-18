@@ -26,8 +26,8 @@ const VOICE_SETTINGS = {
   use_speaker_boost: true
 };
 
-// OpenClaude timeout (3 minutes - if it hasn't responded by then, something is wrong)
-const OPENCLAUDE_TIMEOUT_MS = 180000;
+// OpenClaude timeout (7 minutes - complex tasks with tools need more time)
+const OPENCLAUDE_TIMEOUT_MS = 420000;
 
 // Session tracking: use --continue after first message, reset after 30 min gap
 let hasActiveSession = false;
@@ -242,7 +242,7 @@ async function safeSendChatAction(chatId, action) {
 // --- OpenClaude CLI (with real timeout) ---
 function callOpenClaudeWithImage(userMessage, extraDirs = []) {
   return new Promise((resolve, reject) => {
-    const args = ['-p', '--tools', 'Read', '--system-prompt-file', SYSTEM_PROMPT_FILE, '--no-session-persistence'];
+    const args = ['-p', '--dangerously-skip-permissions', '--system-prompt-file', SYSTEM_PROMPT_FILE, '--no-session-persistence'];
     for (const dir of extraDirs) {
       args.push('--add-dir', dir);
     }
@@ -298,7 +298,7 @@ function callOpenClaude(userMessage) {
     // Decide: continue existing session or start fresh
     const shouldContinue = hasActiveSession && gap < SESSION_GAP_MS;
 
-    const args = ['-p'];
+    const args = ['-p', '--dangerously-skip-permissions'];
     if (shouldContinue) {
       args.push('--continue');
       console.log(`[OpenClaude] Resuming session (gap: ${Math.round(gap / 1000)}s)`);
