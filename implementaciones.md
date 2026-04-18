@@ -4,6 +4,23 @@ Registro de features implementadas, cambios arquitecturales y fixes.
 
 ---
 
+## 2026-04-18 - Audio inteligente (analiza contenido antes de responder)
+
+### Problema
+Cuando Jose mandaba un audio, Maximus siempre respondía con audio automáticamente, sin analizar el contenido. Si Jose decía "respondeme con texto" o pedía algo técnico (reportes, listas, código), igual le mandaba un voice note.
+
+### Solución
+- CLAUDE.md y system-prompt.txt actualizados: Maximus ahora **lee y analiza el contenido del audio PRIMERO** antes de decidir el formato de respuesta
+- Solo usa [AUDIO] para conversación casual
+- Usa [TEXTO] cuando Jose pide texto, datos técnicos, reportes, listas, o dice "respondeme con texto", "modo trabajo", etc.
+- En caso de duda, defaultea a [TEXTO] (más seguro que mandar audio cuando Jose quería leer)
+
+### Archivos modificados
+- `CLAUDE.md` — Regla de formato reescrita
+- `system-prompt.txt` — Misma regla actualizada
+
+---
+
 ## 2026-04-18 - Cola inteligente + Batching de mensajes
 
 ### Cambios
