@@ -26,8 +26,13 @@ const VOICE_SETTINGS = {
   use_speaker_boost: true
 };
 
-// OpenClaude timeout (5 minutes - long messages need more time)
-const OPENCLAUDE_TIMEOUT_MS = 300000;
+// OpenClaude timeout (3 minutes - if it hasn't responded by then, something is wrong)
+const OPENCLAUDE_TIMEOUT_MS = 180000;
+
+// Session tracking: use --continue after first message, reset after 30 min gap
+let hasActiveSession = false;
+let lastMessageTime = 0;
+const SESSION_GAP_MS = 30 * 60 * 1000; // 30 minutes = new session
 
 // --- Status Cards (live progress messages) ---
 class StatusCard {
@@ -37,14 +42,23 @@ class StatusCard {
     this.messageId = null;
     this.steps = [];
     this.currentStep = -1;
+    this.startTime = Date.now();
+    this.stepStartTime = Date.now();
+    this.typingInterval = null;
+    this.pulseInterval = null;
   }
 
   async init(steps) {
     this.steps = steps.map(s => ({ emoji: s[0], label: s[1], status: 'pending' }));
     this.currentStep = 0;
     this.steps[0].status = 'active';
+    this.stepStartTime = Date.now();
     const msg = await this.bot.sendMessage(this.chatId, this._render(), { parse_mode: 'HTML' });
     this.messageId = msg.message_id;
+    // Start typing indicator
+    this._startTyping();
+    // Pulse: update elapsed time every 5s so Jose sees it's alive
+    this.pulseInterval = setInterval(() => this._update(), 5000);
   }
 
   async advance() {
@@ -54,12 +68,13 @@ class StatusCard {
     this.currentStep++;
     if (this.currentStep < this.steps.length) {
       this.steps[this.currentStep].status = 'active';
+      this.stepStartTime = Date.now();
       await this._update();
     }
   }
 
   async complete() {
-    // Mark all remaining as done
+    this._stopTimers();
     for (const s of this.steps) { if (s.status !== 'done') s.status = 'done'; }
     try {
       if (this.messageId) {
@@ -69,13 +84,13 @@ class StatusCard {
   }
 
   async fail(errorMsg) {
+    this._stopTimers();
     if (this.currentStep >= 0 && this.currentStep < this.steps.length) {
       this.steps[this.currentStep].status = 'fail';
     }
     try {
       if (this.messageId) {
         await this._update();
-        // Leave error visible for 5 seconds then delete
         setTimeout(async () => {
           try { await this.bot.deleteMessage(this.chatId, this.messageId); } catch (e) {}
         }, 5000);
@@ -83,13 +98,36 @@ class StatusCard {
     } catch (e) {}
   }
 
+  _startTyping() {
+    const action = this.steps.some(s => s.emoji === '🎙️') ? 'record_voice' : 'typing';
+    safeSendChatAction(this.chatId, action);
+    this.typingInterval = setInterval(() => {
+      safeSendChatAction(this.chatId, action);
+    }, 4000);
+  }
+
+  _stopTimers() {
+    if (this.typingInterval) { clearInterval(this.typingInterval); this.typingInterval = null; }
+    if (this.pulseInterval) { clearInterval(this.pulseInterval); this.pulseInterval = null; }
+  }
+
+  _formatElapsed(ms) {
+    const secs = Math.floor(ms / 1000);
+    if (secs < 60) return `${secs}s`;
+    return `${Math.floor(secs / 60)}m ${secs % 60}s`;
+  }
+
   _render() {
     const icons = { pending: '⏳', active: '⚡', done: '✅', fail: '❌' };
+    const now = Date.now();
     const lines = this.steps.map(s => {
       const icon = icons[s.status];
       const style = s.status === 'active' ? `<b>${s.label}</b>` : s.label;
-      return `${icon} ${s.emoji} ${style}`;
+      const elapsed = s.status === 'active' ? ` (${this._formatElapsed(now - this.stepStartTime)})` : '';
+      return `${icon} ${s.emoji} ${style}${elapsed}`;
     });
+    const total = this._formatElapsed(now - this.startTime);
+    lines.push(`\n⏱ ${total}`);
     return lines.join('\n');
   }
 
@@ -210,12 +248,21 @@ function callOpenClaudeWithImage(userMessage, extraDirs = []) {
 
 function callOpenClaude(userMessage) {
   return new Promise((resolve, reject) => {
-    const args = [
-      '-p',
-      '--system-prompt-file', SYSTEM_PROMPT_FILE,
-      '--no-session-persistence',
-      userMessage
-    ];
+    const now = Date.now();
+    const gap = now - lastMessageTime;
+
+    // Decide: continue existing session or start fresh
+    const shouldContinue = hasActiveSession && gap < SESSION_GAP_MS;
+
+    const args = ['-p'];
+    if (shouldContinue) {
+      args.push('--continue');
+      console.log(`[OpenClaude] Resuming session (gap: ${Math.round(gap / 1000)}s)`);
+    } else {
+      args.push('--system-prompt-file', SYSTEM_PROMPT_FILE);
+      console.log(`[OpenClaude] Starting new session`);
+    }
+    args.push(userMessage);
 
     const child = spawn(OPENCLAUDE_BIN, args, {
       env: { ...process.env, CLAUDECODE: '1' },
@@ -228,11 +275,9 @@ function callOpenClaude(userMessage) {
     let stderr = '';
     let killed = false;
 
-    // Real timeout: kill the process if it takes too long
     const timer = setTimeout(() => {
       killed = true;
       child.kill('SIGTERM');
-      // Force kill after 5 seconds if still alive
       setTimeout(() => {
         try { child.kill('SIGKILL'); } catch (e) { /* already dead */ }
       }, 5000);
@@ -244,15 +289,18 @@ function callOpenClaude(userMessage) {
     child.on('close', (code) => {
       clearTimeout(timer);
       if (killed) {
+        // On timeout, reset session so next message starts fresh
+        hasActiveSession = false;
         reject(new Error(`OpenClaude timed out after ${OPENCLAUDE_TIMEOUT_MS / 1000}s`));
         return;
       }
-      if (code !== 0) {
-        console.error(`[OpenClaude Error] Exit code: ${code}`);
-        reject(new Error(`OpenClaude exited with code ${code}: ${stderr}`));
-        return;
+      if (stdout.trim()) {
+        hasActiveSession = true;
+        lastMessageTime = Date.now();
+        resolve(stdout.trim());
+      } else {
+        reject(new Error(`OpenClaude exited ${code}: ${stderr.substring(0, 200)}`));
       }
-      resolve(stdout.trim());
     });
 
     child.on('error', (err) => {
@@ -486,9 +534,7 @@ bot.on('message', async (msg) => {
         }
 
         await status.advance(); // → Pensando
-        const context = memory.buildContext();
-        const enrichedMessage = context ? `${context}\n\n[Este mensaje viene de un audio de Jose] ${transcription}` : `[Este mensaje viene de un audio de Jose] ${transcription}`;
-        const rawResponse = await callOpenClaude(enrichedMessage);
+        const rawResponse = await callOpenClaude(`[Este mensaje viene de un audio de Jose] ${transcription}`);
 
         const formatMatch = rawResponse.match(/^\[(AUDIO|TEXTO)\]\s*/i);
         const outputFormat = formatMatch ? formatMatch[1].toUpperCase() : 'AUDIO';
@@ -548,15 +594,13 @@ bot.on('message', async (msg) => {
         await downloadTelegramFile(fileId, imgPath);
 
         await status.advance(); // → Analizando imagen
-        const context = memory.buildContext();
         const imgMessage = [
-          context || '',
-          `[IMAGEN enviada por Jose]\n`,
+          `[IMAGEN enviada por Jose]`,
           `La imagen está guardada en: ${imgPath}`,
           `Usá el Read tool para verla y analizarla.`,
-          caption ? `\nCaption de Jose: "${caption}"` : '\nJose no escribió caption.',
-          `\nRespondé en base a lo que ves en la imagen.`
-        ].filter(Boolean).join('\n');
+          caption ? `Caption de Jose: "${caption}"` : 'Jose no escribió caption.',
+          `Respondé en base a lo que ves en la imagen.`
+        ].join('\n');
 
         await status.advance(); // → Pensando
         const rawResponse = await callOpenClaudeWithImage(imgMessage, [TMP_DIR]);
@@ -612,9 +656,7 @@ bot.on('message', async (msg) => {
 
     try {
       await status.advance(); // → Pensando
-      const context = memory.buildContext();
-      const enrichedMessage = context ? `${context}\n\n[Este mensaje viene de texto de Jose] ${text}` : `[Este mensaje viene de texto de Jose] ${text}`;
-      const rawResponse = await callOpenClaude(enrichedMessage);
+      const rawResponse = await callOpenClaude(text);
 
       const formatMatch = rawResponse.match(/^\[(AUDIO|TEXTO)\]\s*/i);
       const outputFormat = formatMatch ? formatMatch[1].toUpperCase() : 'TEXTO';

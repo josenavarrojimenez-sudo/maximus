@@ -9,5 +9,6 @@ services:
     volumes:
       - /root/.openclaude/.credentials.json:/app/.openclaude/.credentials.json
       - /root/maximus-data:/app/data
+      - /root/maximus-sessions:/app/.claude
     tmpfs:
       - /app/tmp:uid=999,gid=999

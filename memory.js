@@ -9,7 +9,7 @@ const MEMORY_DIR = path.join(DATA_DIR, 'memory');
 
 const DIRS = ['canon', 'journal', 'user', 'decisions', 'project', 'inbox', 'inbox/archived'];
 const CONVERSATION_GAP_MS = 30 * 60 * 1000; // 30 minutes
-const MAX_RECENT_MESSAGES = 50; // Sin límite artificial duro — el LLM maneja su context window
+const MAX_RECENT_MESSAGES = 10; // Mínimo contexto para máxima velocidad
 
 let db = null;
 let currentConversationId = null;
@@ -142,7 +142,7 @@ function buildContext() {
     const history = recentMessages.map(m => {
       const time = new Date(m.timestamp).toLocaleTimeString('es-CR', { hour: '2-digit', minute: '2-digit' });
       const name = m.role === 'user' ? 'Jose' : 'Maximus';
-      const content = m.content.length > 2000 ? m.content.substring(0, 2000) + '...' : m.content;
+      const content = m.content.length > 500 ? m.content.substring(0, 500) + '...' : m.content;
       return `[${time}] ${name}: ${content}`;
     }).join('\n');
     parts.push(`=== HISTORIAL RECIENTE ===\n${history}`);
@@ -154,16 +154,8 @@ function buildContext() {
     parts.push(`=== MEMORIA CORE ===\n${canon}`);
   }
 
-  // 3. Today's journal
-  const today = new Date().toISOString().split('T')[0];
-  const journalPath = path.join(MEMORY_DIR, 'journal', `${today}.md`);
-  try {
-    const journal = fs.readFileSync(journalPath, 'utf-8').trim();
-    if (journal) {
-      const journalContent = journal.length > 1500 ? '...\n' + journal.substring(journal.length - 1500) : journal;
-      parts.push(`=== JOURNAL DE HOY ===\n${journalContent}`);
-    }
-  } catch (e) { /* no journal yet */ }
+  // 3. Today's journal — SKIPPED for speed (context already in recent messages)
+  // Journal se usa solo para el daily summary cron, no para cada mensaje
 
   // 4. User preferences
   const user = readMarkdownDir('user');
@@ -183,11 +175,8 @@ function buildContext() {
     parts.push(`=== DECISIONES CLAVE ===\n${decisions}`);
   }
 
-  // 7. Pending inbox items (unprocessed self-memories)
-  const inbox = readMarkdownDir('inbox');
-  if (inbox) {
-    parts.push(`=== RECUERDOS PENDIENTES (inbox) ===\n${inbox}`);
-  }
+  // 7. Pending inbox items — SKIPPED for speed
+  // Inbox se procesa en background, no se inyecta en cada mensaje
 
   // Sin truncado: el LLM (Sonnet/Opus) maneja su propio context window
   return parts.join('\n\n');
