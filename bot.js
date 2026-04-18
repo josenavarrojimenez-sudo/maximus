@@ -81,6 +81,56 @@ async function safeSendChatAction(chatId, action) {
 }
 
 // --- OpenClaude CLI (with real timeout) ---
+function callOpenClaudeWithImage(userMessage, extraDirs = []) {
+  return new Promise((resolve, reject) => {
+    const args = ['-p', '--system-prompt-file', SYSTEM_PROMPT_FILE, '--no-session-persistence'];
+    for (const dir of extraDirs) {
+      args.push('--add-dir', dir);
+    }
+    args.push(userMessage);
+
+    const child = spawn(OPENCLAUDE_BIN, args, {
+      env: { ...process.env, CLAUDECODE: '1' },
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+
+    child.stdin.end();
+
+    let stdout = '';
+    let stderr = '';
+    let killed = false;
+
+    const timer = setTimeout(() => {
+      killed = true;
+      child.kill('SIGTERM');
+      setTimeout(() => {
+        try { child.kill('SIGKILL'); } catch (e) { /* already dead */ }
+      }, 5000);
+    }, OPENCLAUDE_TIMEOUT_MS);
+
+    child.stdout.on('data', (data) => { stdout += data.toString(); });
+    child.stderr.on('data', (data) => { stderr += data.toString(); });
+
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (killed) {
+        reject(new Error(`OpenClaude timed out after ${OPENCLAUDE_TIMEOUT_MS / 1000}s`));
+        return;
+      }
+      if (stdout.trim()) {
+        resolve(stdout.trim());
+      } else {
+        reject(new Error(`OpenClaude exited ${code}: ${stderr.substring(0, 200)}`));
+      }
+    });
+
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
+}
+
 function callOpenClaude(userMessage) {
   return new Promise((resolve, reject) => {
     const args = [
@@ -385,6 +435,72 @@ bot.on('message', async (msg) => {
         bot.sendMessage(chatId, 'Mae, tuve un problema con el audio. Intentá de nuevo.');
       } finally {
         cleanup(inputAudio, ttsRaw, ttsBoosted);
+      }
+      return;
+    }
+
+    // --- IMAGE MESSAGE FLOW ---
+    const isImage = !!(msg.photo || (msg.document && msg.document.mime_type && msg.document.mime_type.startsWith('image/')));
+    if (isImage) {
+      const caption = msg.caption || '';
+      console.log(`[Jose] Imagen recibida. Caption: "${caption}"`);
+
+      safeSendChatAction(chatId, 'typing');
+      const typingInterval = setInterval(() => {
+        safeSendChatAction(chatId, 'typing');
+      }, 5000);
+
+      const imgPath = path.join(TMP_DIR, `telegram_img_${timestamp}.jpg`);
+      const ttsRaw = path.join(TMP_DIR, `tts_raw_${timestamp}.ogg`);
+      const ttsBoosted = path.join(TMP_DIR, `tts_boost_${timestamp}.ogg`);
+
+      try {
+        // Get highest resolution photo
+        const fileId = msg.photo
+          ? msg.photo[msg.photo.length - 1].file_id
+          : msg.document.file_id;
+
+        await downloadTelegramFile(fileId, imgPath);
+
+        const context = memory.buildContext();
+        const imgMessage = [
+          context || '',
+          `[IMAGEN enviada por Jose]\n`,
+          `La imagen está guardada en: ${imgPath}`,
+          `Usá el Read tool para verla y analizarla.`,
+          caption ? `\nCaption de Jose: "${caption}"` : '\nJose no escribió caption.',
+          `\nRespondé en base a lo que ves en la imagen.`
+        ].filter(Boolean).join('\n');
+
+        const rawResponse = await callOpenClaudeWithImage(imgMessage, [TMP_DIR]);
+
+        clearInterval(typingInterval);
+
+        const formatMatch = rawResponse.match(/^\[(AUDIO|TEXTO)\]\s*/i);
+        const outputFormat = formatMatch ? formatMatch[1].toUpperCase() : 'TEXTO';
+        let responseText = rawResponse.replace(/^\[(AUDIO|TEXTO)\]\s*/i, '').trim();
+
+        try { responseText = memory.extractAndSaveMemories(responseText); } catch (memErr) { console.error('[Memory Extract Error]', memErr.message); }
+
+        if (outputFormat === 'AUDIO') {
+          await textToSpeech(responseText, ttsRaw);
+          await boostVolume(ttsRaw, ttsBoosted);
+          await bot.sendVoice(chatId, ttsBoosted);
+          console.log(`[Maximus] Voice note enviada (imagen)`);
+        } else {
+          await sendTextResponse(chatId, responseText);
+          console.log(`[Maximus] Texto enviado (imagen ${responseText.length} chars)`);
+        }
+
+        const saveText = caption ? `[Imagen con caption: "${caption}"]` : '[Imagen sin caption]';
+        try { memory.saveExchange(saveText, responseText); } catch (memErr) { console.error('[Memory Error]', memErr.message); }
+
+      } catch (err) {
+        clearInterval(typingInterval);
+        console.error(`[Image Error]`, err.message);
+        bot.sendMessage(chatId, 'Mae, tuve un problema procesando la imagen. Intentá de nuevo.');
+      } finally {
+        cleanup(imgPath, ttsRaw, ttsBoosted);
       }
       return;
     }
