@@ -4,6 +4,52 @@ Registro de features implementadas, cambios arquitecturales y fixes.
 
 ---
 
+## 2026-04-18 - Migración a OpenClaude CLI persistente (stream-json)
+
+### Problema
+Después de migrar al SDK de Anthropic directo, el bot daba error 429 en cada request. El OAuth token de la suscripción Max no está diseñado para llamar a `api.anthropic.com` directamente — funciona solo a través de OpenClaude CLI que usa un endpoint intermedio.
+
+El approach anterior de subprocess (`openclaude -p` por mensaje) también fallaba: stdin cerrado, permisos de tools sin confirmar, timeouts constantes.
+
+### Solución
+Un solo proceso `openclaude` persistente que se comunica con el bot via **stream-json** (NDJSON por stdin/stdout):
+
+- **Spawn único al arranque** — No se crea/destruye proceso por mensaje
+- **Protocolo NDJSON** — Mensajes JSON por stdin, respuestas JSON por stdout
+- **Auth nativa** — Misma OAuth de suscripción Max, sin API key separada
+- **CLAUDE.md nativo** — OpenClaude lo lee automáticamente como system prompt
+- **Auto-respawn** — Si el proceso muere, se relanza en 3 segundos
+- **Timeout 5 min** — Safety net por si OpenClaude se queda pensando
+- **Contexto de memoria** — `memory.buildContext()` inyectado como prefijo de cada mensaje
+- **Imágenes** — Base64 en content array via stream-json (visión nativa)
+
+Flags del proceso:
+```
+openclaude -p --verbose --input-format stream-json --output-format stream-json --dangerously-skip-permissions --model sonnet
+```
+
+### Archivos modificados
+- `bot.js` — `callMaximus()` reescrito: envía NDJSON a stdin, lee respuesta de stdout. Eliminado `@anthropic-ai/sdk`, `getClient()`, `conversationHistory`
+- `Dockerfile` — Reinstalado `@gitlawb/openclaude`. Eliminado `@anthropic-ai/sdk`
+- `package.json` — Eliminado `@anthropic-ai/sdk` de dependencies
+
+### Resultado
+Respuestas significativamente más rápidas. Sin 429, sin timeouts, sin subprocess por mensaje.
+
+---
+
+## 2026-04-18 - Migración a Anthropic SDK directo (REVERTIDA)
+
+### Problema
+El bot usaba OpenClaude CLI como subprocess (`openclaude -p`) que se pegaba constantemente.
+
+### Solución intentada
+Reemplazar subprocess con `@anthropic-ai/sdk` usando el OAuth token directamente. El token sí autenticaba (no daba 401) pero daba **429 rate limit** en cada request porque el endpoint `api.anthropic.com` no acepta tokens OAuth de suscripción Max.
+
+### Estado: REVERTIDA — reemplazada por stream-json persistente (ver arriba)
+
+---
+
 ## 2026-04-18 - Audio inteligente (analiza contenido antes de responder)
 
 ### Problema
