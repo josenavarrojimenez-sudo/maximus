@@ -123,7 +123,7 @@ Maximus revisó el repo y encontró items no implementados. Estado:
 | 4 | Contexto completo sin truncado | NO APLICA — migrado a OpenClaude nativo |
 | 5 | Journal del día en contexto | NO APLICA — OpenClaude maneja su propio contexto |
 | 6 | Inbox pendiente en contexto | NO APLICA — OpenClaude maneja su propio contexto |
-| 7 | Webhook CI/CD | PENDIENTE — Maximus va a implementar |
+| 7 | Webhook CI/CD | NO APLICA — deploys se hacen directo desde OpenClaude en el VPS |
 | 8 | Items inbox sin consolidar | PENDIENTE — Maximus va a procesar |
 
 ---
