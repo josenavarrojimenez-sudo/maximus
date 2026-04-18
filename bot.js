@@ -157,11 +157,21 @@ function isAllowed(msg) {
   return msg.from && msg.from.id === ALLOWED_USER_ID;
 }
 
-// --- Message Queue (process one message at a time) ---
+// --- Message Queue (max 5, drop stale >5min) ---
+const MAX_QUEUE_SIZE = 5;
+const MAX_QUEUE_AGE_MS = 5 * 60 * 1000; // 5 minutes
 const messageQueue = [];
 let processing = false;
 
 async function enqueueMessage(handler) {
+  handler._enqueuedAt = Date.now();
+
+  // Drop oldest if queue is full
+  if (messageQueue.length >= MAX_QUEUE_SIZE) {
+    const dropped = messageQueue.shift();
+    console.log(`[Queue] Dropped oldest message (queue full, max ${MAX_QUEUE_SIZE})`);
+  }
+
   messageQueue.push(handler);
   if (!processing) {
     processQueue();
@@ -173,6 +183,14 @@ async function processQueue() {
   processing = true;
   while (messageQueue.length > 0) {
     const handler = messageQueue.shift();
+
+    // Drop stale messages (>5 min waiting)
+    const age = Date.now() - (handler._enqueuedAt || 0);
+    if (age > MAX_QUEUE_AGE_MS) {
+      console.log(`[Queue] Dropped stale message (waited ${Math.round(age / 1000)}s)`);
+      continue;
+    }
+
     try {
       await handler();
     } catch (err) {
@@ -180,6 +198,32 @@ async function processQueue() {
     }
   }
   processing = false;
+}
+
+// --- Text Batching (2s window to group rapid messages) ---
+const BATCH_WINDOW_MS = 2000;
+let batchBuffer = [];
+let batchTimer = null;
+
+function enqueueBatchedText(msg, chatId) {
+  batchBuffer.push(msg.text);
+
+  if (batchTimer) clearTimeout(batchTimer);
+
+  batchTimer = setTimeout(() => {
+    const count = batchBuffer.length;
+    const combinedText = batchBuffer.join('\n');
+    batchBuffer = [];
+    batchTimer = null;
+
+    if (count > 1) {
+      console.log(`[Batch] Combined ${count} messages into one`);
+    }
+
+    enqueueMessage(async () => {
+      await handleTextMessage(chatId, combinedText, Date.now());
+    });
+  }, BATCH_WINDOW_MS);
 }
 
 // --- Safe Telegram API call (handles 429 rate limits) ---
@@ -638,56 +682,60 @@ bot.on('message', async (msg) => {
       return;
     }
 
-    // --- TEXT MESSAGE FLOW ---
+    // --- TEXT MESSAGE FLOW (uses batching) ---
     const text = msg.text;
     if (!text) return;
 
     console.log(`[Jose] ${text}`);
-
-    const status = new StatusCard(bot, chatId);
-    await status.init([
-      ['📨', 'Recibido'],
-      ['🧠', 'Pensando'],
-      ['💬', 'Preparando respuesta'],
-    ]);
-
-    const ttsRaw = path.join(TMP_DIR, `tts_raw_${timestamp}.ogg`);
-    const ttsBoosted = path.join(TMP_DIR, `tts_boost_${timestamp}.ogg`);
-
-    try {
-      await status.advance(); // → Pensando
-      const rawResponse = await callOpenClaude(text);
-
-      const formatMatch = rawResponse.match(/^\[(AUDIO|TEXTO)\]\s*/i);
-      const outputFormat = formatMatch ? formatMatch[1].toUpperCase() : 'TEXTO';
-      let responseText = rawResponse.replace(/^\[(AUDIO|TEXTO)\]\s*/i, '').trim();
-
-      try { responseText = memory.extractAndSaveMemories(responseText); } catch (memErr) { console.error('[Memory Extract Error]', memErr.message); }
-
-      await status.advance(); // → Preparando respuesta
-
-      if (outputFormat === 'AUDIO') {
-        await textToSpeech(responseText, ttsRaw);
-        await boostVolume(ttsRaw, ttsBoosted);
-        await status.complete();
-        await bot.sendVoice(chatId, ttsBoosted);
-        console.log(`[Maximus] Voice note enviada (desde texto)`);
-      } else {
-        await status.complete();
-        await sendTextResponse(chatId, responseText);
-        console.log(`[Maximus] Respuesta enviada (${responseText.length} chars)`);
-      }
-
-      try { memory.saveExchange(text, responseText); } catch (memErr) { console.error('[Memory Error]', memErr.message); }
-    } catch (err) {
-      await status.fail(err.message);
-      console.error(`[Error]`, err.message);
-      bot.sendMessage(chatId, 'Mae, tuve un problema procesando tu mensaje. Intentá de nuevo en un momento.');
-    } finally {
-      cleanup(ttsRaw, ttsBoosted);
-    }
+    enqueueBatchedText(msg, chatId);
   });
 });
+
+// --- Handle text message (called after batching window) ---
+async function handleTextMessage(chatId, text, timestamp) {
+  const status = new StatusCard(bot, chatId);
+  await status.init([
+    ['📨', 'Recibido'],
+    ['🧠', 'Pensando'],
+    ['💬', 'Preparando respuesta'],
+  ]);
+
+  const ttsRaw = path.join(TMP_DIR, `tts_raw_${timestamp}.ogg`);
+  const ttsBoosted = path.join(TMP_DIR, `tts_boost_${timestamp}.ogg`);
+
+  try {
+    await status.advance(); // → Pensando
+    const rawResponse = await callOpenClaude(text);
+
+    const formatMatch = rawResponse.match(/^\[(AUDIO|TEXTO)\]\s*/i);
+    const outputFormat = formatMatch ? formatMatch[1].toUpperCase() : 'TEXTO';
+    let responseText = rawResponse.replace(/^\[(AUDIO|TEXTO)\]\s*/i, '').trim();
+
+    try { responseText = memory.extractAndSaveMemories(responseText); } catch (memErr) { console.error('[Memory Extract Error]', memErr.message); }
+
+    await status.advance(); // → Preparando respuesta
+
+    if (outputFormat === 'AUDIO') {
+      await textToSpeech(responseText, ttsRaw);
+      await boostVolume(ttsRaw, ttsBoosted);
+      await status.complete();
+      await bot.sendVoice(chatId, ttsBoosted);
+      console.log(`[Maximus] Voice note enviada (desde texto)`);
+    } else {
+      await status.complete();
+      await sendTextResponse(chatId, responseText);
+      console.log(`[Maximus] Respuesta enviada (${responseText.length} chars)`);
+    }
+
+    try { memory.saveExchange(text, responseText); } catch (memErr) { console.error('[Memory Error]', memErr.message); }
+  } catch (err) {
+    await status.fail(err.message);
+    console.error(`[Error]`, err.message);
+    bot.sendMessage(chatId, 'Mae, tuve un problema procesando tu mensaje. Intentá de nuevo en un momento.');
+  } finally {
+    cleanup(ttsRaw, ttsBoosted);
+  }
+}
 
 // --- Daily Summary Cron (11:59 PM) ---
 function scheduleDailySummary() {
