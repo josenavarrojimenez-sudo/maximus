@@ -1,0 +1,12 @@
+services:
+  maximus-telegram:
+    build: .
+    container_name: maximus-telegram
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - /root/.openclaude/.credentials.json:/root/.openclaude/.credentials.json:ro
+      - /root/maximus-data:/app/data
+    tmpfs:
+      - /app/tmp
