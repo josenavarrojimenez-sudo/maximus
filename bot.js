@@ -61,6 +61,19 @@ function startMCHeartbeat() {
   }, 30000);
 }
 
+async function mcUpdateStatus(status, activity) {
+  if (!mcAgentId) return;
+  try {
+    await mcRequest(`/api/agents/${mcAgentId}/heartbeat`, 'POST', {
+      sessionId: `${MC_AGENT_NAME}:telegram`,
+      status,
+      last_activity: activity
+    });
+  } catch (e) {
+    // silently ignore — non-critical
+  }
+}
+
 function startMCSSE() {
   if (mcSseActive || !mcAgentId) return;
   mcSseActive = true;
@@ -520,6 +533,12 @@ function handleOpenClaudeMessage(msg) {
     if (textParts.length > 0) {
       assistantText = textParts.join('');
     }
+    // Track tool_use calls in Mission Control
+    const toolCalls = msg.message.content.filter(c => c.type === 'tool_use');
+    if (toolCalls.length > 0 && pendingResolve) {
+      const toolName = toolCalls[0].name || 'tool';
+      mcUpdateStatus('working', `Ejecutando: ${toolName}`);
+    }
   } else if (msg.type === 'result') {
     // Track usage/cost if available
     if (msg.usage) {
@@ -543,6 +562,7 @@ function handleOpenClaudeMessage(msg) {
         // Auth error → kill and respawn, reject so caller can retry
         if (text.includes('Not logged in') || text.includes('Please run /login') || text.includes('authentication_error') || text.includes('Invalid authentication credentials')) {
           console.error('[OpenClaude] Auth error detected — killing process for respawn');
+          mcUpdateStatus('idle', 'Error de autenticación — reiniciando');
           intentionalKill = true;
           if (openclaudeProcess) openclaudeProcess.kill('SIGTERM');
           resolve('[ERROR:AUTH] Maximus se está reiniciando, intentá de nuevo en unos segundos.');
@@ -550,6 +570,7 @@ function handleOpenClaudeMessage(msg) {
         }
         if (text.includes('context limit') || text.includes('compaction has failed') || text.includes('automatic compaction')) {
           console.error('[OpenClaude] Context limit reached — killing process for fresh session');
+          mcUpdateStatus('idle', 'Contexto lleno — reiniciando sesión');
           intentionalKill = true;
           if (openclaudeProcess) openclaudeProcess.kill('SIGTERM');
           resolve('Se llenó el contexto, me estoy reiniciando con sesión nueva. Repetí tu mensaje en unos segundos.');
@@ -557,6 +578,7 @@ function handleOpenClaudeMessage(msg) {
         }
       }
       console.log(`[OpenClaude] Response received (${text.length} chars)`);
+      mcUpdateStatus('idle', 'Respuesta enviada a Jose');
       turnCount++;
       // Proactive session rotation to prevent context overflow
       if (turnCount >= SESSION_ROTATE_TURNS) {
@@ -641,6 +663,10 @@ async function callMaximus(userMessage, imageBase64 = null, imageMimeType = null
     message: { role: 'user', content },
     parent_tool_use_id: null
   };
+
+  // Notify Mission Control: agent is now working
+  const activityPreview = typeof content === 'string' ? content.substring(0, 80) : 'Procesando mensaje con imagen';
+  mcUpdateStatus('working', activityPreview);
 
   return new Promise((resolve, reject) => {
     assistantText = '';
@@ -2068,9 +2094,12 @@ bot.on('message', async (msg) => {
 
       try {
         await downloadTelegramFile(fileId, inputAudio);
+        const audioSize = fs.statSync(inputAudio).size;
+        console.log(`[Audio] Archivo descargado: ${inputAudio} (${audioSize} bytes)`);
 
         await status.advance(); // → Transcribiendo
         const transcription = await transcribeAudio(inputAudio);
+        console.log(`[Audio] Transcripción resultado: "${transcription}" (length: ${transcription?.length || 0})`);
         if (!transcription || transcription.trim().length === 0) {
           await status.fail();
           bot.sendMessage(chatId, 'Mae, no logré entender el audio. ¿Podés repetirlo?');
@@ -2079,7 +2108,9 @@ bot.on('message', async (msg) => {
         }
 
         await status.advance(); // → Pensando
-        let rawResponse = await callMaximus(`[Este mensaje viene de un audio de Jose] ${transcription}`);
+        const audioPrompt = `[Este mensaje viene de un audio de Jose] ${transcription}`;
+        console.log(`[Audio] Enviando a OpenClaude: "${audioPrompt.substring(0, 200)}"`);
+        let rawResponse = await callMaximus(audioPrompt);
         rawResponse = await handleDelegation(rawResponse);
 
         const formatMatch = rawResponse.match(/^\[(AUDIO|TEXTO)\]\s*/i);
@@ -2197,6 +2228,36 @@ bot.on('message', async (msg) => {
   });
 });
 
+// --- Auto-fetch URLs with Jina.ai Reader ---
+async function extractUrlContent(text) {
+  const urlRegex = /https?:\/\/[^\s<>'")\]]+/gi;
+  const urls = text.match(urlRegex);
+  if (!urls || urls.length === 0) return text;
+
+  let enrichedText = text;
+  for (const url of urls.slice(0, 3)) { // max 3 URLs per message
+    try {
+      console.log(`[Jina] Fetching: ${url}`);
+      const jinaUrl = `https://r.jina.ai/${url}`;
+      const response = await axios.get(jinaUrl, {
+        headers: { 'Accept': 'text/plain', 'X-No-Cache': 'true' },
+        timeout: 20000,
+        maxContentLength: 50000
+      });
+      const content = response.data?.substring(0, 4000) || '';
+      if (content.length > 100 && !content.includes('Enable JavaScript and cookies')) {
+        console.log(`[Jina] Contenido extraído: ${content.length} chars`);
+        enrichedText += `\n\n[CONTENIDO EXTRAÍDO DE ${url}]:\n${content}\n[FIN DEL CONTENIDO]`;
+      } else {
+        console.log(`[Jina] Contenido insuficiente o bloqueado para: ${url}`);
+      }
+    } catch (err) {
+      console.log(`[Jina] Error fetching ${url}: ${err.message}`);
+    }
+  }
+  return enrichedText;
+}
+
 // --- Handle text message (called after batching window) ---
 async function handleTextMessage(chatId, text, timestamp) {
   const status = new StatusCard(bot, chatId);
@@ -2212,8 +2273,13 @@ async function handleTextMessage(chatId, text, timestamp) {
   try {
     processingStartTime = Date.now();
     currentProcessingText = text.substring(0, 100);
+    // Auto-fetch URL content with Jina.ai before sending to OpenClaude
+    const enrichedText = await extractUrlContent(text);
+    if (enrichedText !== text) {
+      console.log(`[Jina] Mensaje enriquecido con contenido de URLs`);
+    }
     await status.advance(); // → Pensando
-    let rawResponse = await callMaximus(text);
+    let rawResponse = await callMaximus(enrichedText);
     rawResponse = await handleDelegation(rawResponse);
 
     const formatMatch = rawResponse.match(/^\[(AUDIO|TEXTO)\]\s*/i);
