@@ -140,7 +140,7 @@ const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const TMP_DIR = path.join(__dirname, 'tmp');
 
 // ElevenLabs config
-const VOICE_ID = 'WEXRePkZGpmcFLvCOaB1';
+const VOICE_ID = 'wo6udizrrtpIxWGp2qJk';
 const TTS_MODEL = 'eleven_v3';
 const OUTPUT_FORMAT = 'opus_48000_128';
 const VOICE_SETTINGS = {

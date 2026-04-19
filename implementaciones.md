@@ -233,6 +233,16 @@ Maximus tenía restricciones artificiales — no podía manejar Docker, crear ag
 
 ---
 
+## 2026-04-19 - Cambio de Voice ID
+
+### Cambio
+- Voice ID cambiado de `WEXRePkZGpmcFLvCOaB1` a `wo6udizrrtpIxWGp2qJk`
+
+### Archivos modificados
+- `bot.js` — VOICE_ID actualizado
+
+---
+
 ## 2026-04-19 - Fix timeout Optimus (sin kill, notify + safety net)
 
 ### Problema
@@ -291,7 +301,7 @@ La voz de Maximus sonaba plana y sin emoción. ElevenLabs Support recomendó usa
 - **Status Cards** — Mensajes HTML de progreso en Telegram que se auto-eliminan al completar
 - **OAuth auto-refresh** — Credenciales montadas read-write para que OpenClaude refresque tokens
 - **Soporte de imagenes** — Handler para fotos y documentos de imagen
-- **Audio bidireccional** — ElevenLabs TTS/STT con chunking y volume boost (Voice ID: WEXRePkZGpmcFLvCOaB1, modelo eleven_v3)
+- **Audio bidireccional** — ElevenLabs TTS/STT con chunking y volume boost (Voice ID: wo6udizrrtpIxWGp2qJk, modelo eleven_v3)
 - **Memoria persistente** — SQLite + Markdown (episodica, journal, canon, preferencias)
 - **Auto-memoria** — Bloques [REMEMBER] procesados automaticamente
 - **Cola de mensajes** — Procesamiento secuencial con límite 5, drop stale, batching 2s
