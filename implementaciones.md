@@ -381,3 +381,68 @@ La voz de Maximus sonaba plana y sin emoción. ElevenLabs Support recomendó usa
 - **Cola de mensajes** — Procesamiento secuencial con límite 5, drop stale, batching 2s
 - **Daily Summary** — Cron 11:59 PM con journal ejecutivo
 - **Linear integration** — Modulo listo, falta API key
+
+---
+
+## 2026-04-19 - Fix credenciales OAuth + directory mount pattern
+
+### Problema
+Todos los tokens OAuth (Anthropic + Codex) expiraron simultáneamente. Docker bind mount de archivo individual pinea al inode — cuando el token se refresca, se crea un nuevo archivo y el container sigue viendo el viejo.
+
+### Solución
+- Directorios de credenciales: `/root/.openclaude-creds/` y `/root/.codex-creds/`
+- systemd watcher que sincroniza credenciales a directorios dedicados
+- docker-compose monta DIRECTORIOS en vez de archivos individuales
+- entrypoint.sh crea symlinks desde dirs montados
+- bot.js detecta errores 401/authentication_error y auto-respawn
+
+---
+
+## 2026-04-19 - Session recovery optimizado + rotación proactiva
+
+### Problema
+Session recovery inyectaba 20 mensajes (300 chars c/u) al arrancar, consumiendo mucho contexto. Además, el contexto se llenaba después de muchos turnos sin forma de prevenirlo.
+
+### Solución
+- **Session recovery reducido:** 20→10 mensajes, 300→150 chars max, respuesta "ok" (antes era frase larga)
+- **Rotación proactiva:** cada 50 turnos, auto-kill + respawn silencioso del proceso OpenClaude
+- Aplicado a: Maximus, Optimus, Template, Hijos Template
+
+---
+
+## 2026-04-19 - Sistema de Delegación al Host
+
+### Problema
+Los bots en containers Docker tienen limitaciones: no pueden acceder a archivos del host, git operations fallan, y cuando el contexto se llena pierden capacidad. Jose terminaba viniendo al host manualmente para ejecutar tareas complejas.
+
+### Solución
+Sistema completo de delegación transparente:
+
+**Delegation Service** (`/root/agents/delegation-service/server.js`):
+- HTTP server Node.js en puerto 3847, systemd service auto-restart
+- `POST /delegate` — recibe tarea, spawns OpenClaude CLI en el host con acceso completo
+- `GET /health` — health check
+- Usa `--permission-mode dontAsk` (compatible con root)
+- Timeout default 5 min, max 15 min
+
+**Bot Integration** (todos los bot.js):
+- `delegateToHost(task, context)` — HTTP POST al host service
+- `handleDelegation(rawResponse)` — detecta `[DELEGATE]...[/DELEGATE]` en respuesta de OpenClaude
+- Inyecta resultado de vuelta como mensaje de usuario para que OpenClaude lo formatee
+- Integrado en los 3 flujos: texto, audio, imagen
+
+**Docker Networking:**
+- `extra_hosts: ["host.docker.internal:host-gateway"]` en todos los docker-compose
+
+**CLAUDE.md:**
+- Instrucciones obligatorias: "Si algo falla, DELEGÁ INMEDIATAMENTE sin preguntar"
+- La delegación es transparente para el usuario
+
+**Archivos creados/modificados:**
+- `/root/agents/delegation-service/server.js` (nuevo)
+- `/root/agents/delegation-service/package.json` (nuevo)
+- `/etc/systemd/system/delegation-service.service` (nuevo)
+- `bot.js` — Maximus, Optimus, Template, Hijos Template
+- `docker-compose.yml` — Maximus, Optimus, Template, Hijos Template, Valentina
+- `CLAUDE.md` — Maximus, Optimus, Template, Hijos Template, Valentina
+- `docs/delegacion-host.md` — documentación completa del sistema
