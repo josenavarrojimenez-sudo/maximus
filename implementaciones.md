@@ -233,6 +233,25 @@ Maximus tenía restricciones artificiales — no podía manejar Docker, crear ag
 
 ---
 
+## 2026-04-19 - Soporte de audio (STT) para Optimus y template
+
+### Problema
+Optimus y el template ignoraban los mensajes de audio — caían en `if (!text) return` silenciosamente.
+
+### Solución
+- ElevenLabs STT (Scribe V2) implementado con `https` nativo (sin axios/form-data)
+- Multipart form-data construido manualmente para evitar dependencias extra
+- Handler de audio: descarga → transcribe → envía transcripción a OpenClaude → responde texto
+- Optimus siempre responde en texto (no tiene TTS)
+- ELEVENLABS_API_KEY agregada al .env de Optimus
+
+### Archivos modificados
+- `bot.js` (Optimus) — transcribeAudio(), audio handler en message listener
+- `bot.js` (Template) — mismo cambio
+- `.env` (Optimus) — ELEVENLABS_API_KEY agregada
+
+---
+
 ## 2026-04-19 - Carpeta de plugins compartida entre todos los agentes
 
 ### Problema
