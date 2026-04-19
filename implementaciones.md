@@ -233,6 +233,23 @@ Maximus tenía restricciones artificiales — no podía manejar Docker, crear ag
 
 ---
 
+## 2026-04-19 - Fix timeout Optimus (sin kill, notify + safety net)
+
+### Problema
+Optimus usaba un timeout de 5 minutos que **mataba** el proceso de OpenClaude cuando se cumplía. Si una tarea legítima tardaba más de 5 min, Optimus moría y parecía "pegado" sin dar feedback al usuario.
+
+### Solución
+Aplicado el mismo fix que Maximus:
+- **Sin timeout que mate** — ya no mata el proceso después de X minutos
+- **Notify cada 3 minutos** — manda typing action para que el usuario vea que está vivo
+- **Safety net de 30 minutos** — solo si lleva 30min sin responder, ahí sí mata (algo está realmente trabado)
+- Todos los `clearTimeout(pendingTimeout)` cambiados a `clearInterval(pendingTimeout)`
+
+### Archivos modificados
+- `bot.js` (en /root/agents/optimus/) — constantes, callOptimus(), handleOpenClaudeMessage(), session recovery
+
+---
+
 ## 2026-04-19 - Voz expresiva con etiquetas emocionales (recomendación ElevenLabs)
 
 ### Problema
