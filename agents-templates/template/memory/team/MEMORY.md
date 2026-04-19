@@ -1,0 +1,2 @@
+- [Timeout Fix Pattern](timeout-fix-pattern.md) — NUNCA matar proceso por timeout, usar notify 3min + safety 30min
+- [Docker Creds Mount](docker-creds-mount.md) — NUNCA montar archivos individuales de creds, usar directorios + symlinks

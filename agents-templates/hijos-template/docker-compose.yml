@@ -1,0 +1,29 @@
+services:
+  AGENT_NAME_LOWER:
+    build: .
+    container_name: AGENT_NAME_LOWER
+    restart: always
+    user: "AGENT_UID:AGENT_GID"
+    group_add:
+      - "989"
+    volumes:
+      - /root/.openclaude-creds:/app/.openclaude-creds:ro
+      - /root/.codex-creds:/app/.codex-creds:ro
+      - /root/agents/AGENT_NAME_LOWER/memory:/app/.openclaude/projects/-app/memory:ro
+      - /root/.openclaude/plugins:/app/.openclaude/plugins
+      - /root/agents/AGENT_NAME_LOWER/data:/app/data
+      - /root/AGENT_NAME_LOWER-sessions:/app/.claude
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /root/agents:/host-agents
+    env_file: .env
+    tmpfs:
+      - /app/tmp:uid=AGENT_UID,gid=AGENT_GID
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - agents-net
+
+networks:
+  agents-net:
+    name: agents-net
+    external: true

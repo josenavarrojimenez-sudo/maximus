@@ -1,0 +1,1 @@
+- [SOUL - Identidad del Agente](soul.md) — Quién soy, personalidad, forma de hablar
