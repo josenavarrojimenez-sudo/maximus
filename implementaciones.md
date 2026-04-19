@@ -233,6 +233,34 @@ Maximus tenía restricciones artificiales — no podía manejar Docker, crear ag
 
 ---
 
+## 2026-04-19 - Voz expresiva con etiquetas emocionales (recomendación ElevenLabs)
+
+### Problema
+La voz de Maximus sonaba plana y sin emoción. ElevenLabs Support recomendó usar etiquetas expresivas entre corchetes y ajustar sliders para más expresividad.
+
+### Solución
+1. **Sliders optimizados** según recomendación de ElevenLabs:
+   - `stability: 0.30` (antes 0.35) — más variable y emocional
+   - `style: 0.70` (antes 0.65) — más carácter y expresividad
+   - `similarity_boost: 0.75` — sin cambio
+   - `use_speaker_boost: true` — sin cambio
+
+2. **Etiquetas expresivas en CLAUDE.md** — Maximus usa corchetes de forma inteligente según contexto:
+   - `[laughs]` — cuando algo da gracia
+   - `[sighs]` — frustración o decepción
+   - `[excited]` — buenas noticias
+   - `[whispers]` — complicidad
+   - `[cries]` — momentos dramáticos (con moderación)
+   - Regla: 1-3 etiquetas por respuesta, solo cuando el contexto lo amerite
+
+3. **Puntuación expresiva** — Puntos suspensivos para pausas, exclamaciones para énfasis
+
+### Archivos modificados
+- `bot.js` — VOICE_SETTINGS ajustados (stability 0.30, style 0.70)
+- `CLAUDE.md` — Sección de expresividad con etiquetas y reglas de uso
+
+---
+
 ## 2026-04-18 - Ajuste de voz
 
 ### Cambios

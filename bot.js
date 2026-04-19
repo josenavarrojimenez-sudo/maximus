@@ -4,8 +4,135 @@ const { execFile, spawn } = require('child_process');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
+const http = require('http');
 const memory = require('./memory');
 const linear = require('./linear');
+
+// ─── Mission Control Integration ──────────────────────────────────────────────
+const MC_HOST = process.env.MC_HOST || 'mission-control';
+const MC_PORT = parseInt(process.env.MC_PORT || '3000');
+const MC_API_KEY = process.env.MC_API_KEY || '';
+const MC_AGENT_NAME = 'maximus';
+const MC_AGENT_ROLE = 'agent';
+
+let mcAgentId = null;
+let mcHeartbeatTimer = null;
+let mcSseActive = false;
+
+function mcRequest(mcPath, method, body) {
+  return new Promise((resolve, reject) => {
+    const data = body ? JSON.stringify(body) : null;
+    const opts = {
+      hostname: MC_HOST, port: MC_PORT, path: mcPath, method,
+      headers: {
+        'x-api-key': MC_API_KEY,
+        'Content-Type': 'application/json',
+        ...(data ? { 'Content-Length': Buffer.byteLength(data) } : {})
+      }
+    };
+    const req = http.request(opts, (res) => {
+      let d = '';
+      res.on('data', c => d += c);
+      res.on('end', () => {
+        try { resolve({ status: res.statusCode, body: JSON.parse(d) }); }
+        catch (e) { resolve({ status: res.statusCode, body: d }); }
+      });
+    });
+    req.on('error', reject);
+    if (data) req.write(data);
+    req.end();
+  });
+}
+
+// Exponer mcRequest globalmente para comandos Telegram
+global.mcRequest = mcRequest;
+
+function startMCHeartbeat() {
+  if (mcHeartbeatTimer) clearInterval(mcHeartbeatTimer);
+  mcHeartbeatTimer = setInterval(async () => {
+    if (!mcAgentId) return;
+    try {
+      await mcRequest(`/api/agents/${mcAgentId}/heartbeat`, 'POST', {
+        sessionId: `${MC_AGENT_NAME}:telegram`
+      });
+    } catch (e) {
+      console.error('[MC] Heartbeat error:', e.message);
+    }
+  }, 30000);
+}
+
+function startMCSSE() {
+  if (mcSseActive || !mcAgentId) return;
+  mcSseActive = true;
+  const opts = {
+    hostname: MC_HOST, port: MC_PORT,
+    path: `/api/events?agent_id=${mcAgentId}`,
+    method: 'GET',
+    headers: { 'x-api-key': MC_API_KEY, 'Accept': 'text/event-stream', 'Cache-Control': 'no-cache' }
+  };
+  const req = http.request(opts, (res) => {
+    console.log('[MC] SSE stream connected');
+    let buffer = '';
+    res.on('data', (chunk) => {
+      buffer += chunk.toString();
+      const events = buffer.split('\n\n');
+      buffer = events.pop();
+      for (const ev of events) {
+        const dataLine = ev.split('\n').find(l => l.startsWith('data:'));
+        if (!dataLine) continue;
+        try {
+          const data = JSON.parse(dataLine.slice(5).trim());
+          console.log('[MC] SSE event:', data.type);
+          // Notificar a Jose sobre eventos relevantes
+          if (data.type === 'task.completed' && data.task) {
+            const jose = parseInt(process.env.ALLOWED_USER_ID);
+            if (jose && global.telegramBot) {
+              global.telegramBot.sendMessage(jose,
+                `✅ <b>Tarea completada</b>\n<b>${data.task.title}</b>\nAgente: ${data.task.agent_name || 'desconocido'}`,
+                { parse_mode: 'HTML' }
+              ).catch(() => {});
+            }
+          }
+        } catch (e) {}
+      }
+    });
+    res.on('end', () => {
+      mcSseActive = false;
+      setTimeout(() => startMCSSE(), 5000);
+    });
+    res.on('error', () => {
+      mcSseActive = false;
+      setTimeout(() => startMCSSE(), 5000);
+    });
+  });
+  req.on('error', () => {
+    mcSseActive = false;
+    setTimeout(() => startMCSSE(), 5000);
+  });
+  req.end();
+}
+
+async function connectToMC() {
+  if (!MC_API_KEY) return;
+  try {
+    const res = await mcRequest('/api/connect', 'POST', {
+      tool_name: 'openclaude',
+      tool_version: '0.4.0',
+      agent_name: MC_AGENT_NAME,
+      agent_role: MC_AGENT_ROLE
+    });
+    if (res.status === 200 && res.body.agent_id) {
+      mcAgentId = res.body.agent_id;
+      console.log(`[MC] Conectado — agent_id=${mcAgentId}`);
+      startMCHeartbeat();
+      startMCSSE();
+    }
+  } catch (e) {
+    console.error('[MC] Error conectando:', e.message);
+    setTimeout(connectToMC, 15000);
+  }
+}
+// ──────────────────────────────────────────────────────────────────────────────
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const ALLOWED_USER_ID = parseInt(process.env.ALLOWED_USER_ID, 10);
@@ -17,9 +144,9 @@ const VOICE_ID = 'WEXRePkZGpmcFLvCOaB1';
 const TTS_MODEL = 'eleven_v3';
 const OUTPUT_FORMAT = 'opus_48000_128';
 const VOICE_SETTINGS = {
-  stability: 0.5,
+  stability: 0.30,
   similarity_boost: 0.75,
-  style: 0.5,
+  style: 0.70,
   use_speaker_boost: true
 };
 
@@ -193,7 +320,8 @@ let pendingTimeout = null;
 let responseBuffer = '';
 let assistantText = '';
 let intentionalKill = false;
-const OPENCLAUDE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes per request
+const OPENCLAUDE_HARD_TIMEOUT_MS = 30 * 60 * 1000; // 30 min hard safety net
+const OPENCLAUDE_NOTIFY_INTERVAL_MS = 3 * 60 * 1000; // 3 min notify interval
 
 function spawnOpenClaude() {
   const provider = PROVIDERS[currentProvider];
@@ -245,7 +373,7 @@ function spawnOpenClaude() {
       pendingReject(new Error(`OpenClaude process died (code=${code})`));
       pendingResolve = null;
       pendingReject = null;
-      if (pendingTimeout) { clearTimeout(pendingTimeout); pendingTimeout = null; }
+      if (pendingTimeout) { clearInterval(pendingTimeout); pendingTimeout = null; }
     }
     // Respawn (immediate if intentional switch, 3s delay if crash)
     const delay = intentionalKill ? 500 : 3000;
@@ -262,6 +390,47 @@ function spawnOpenClaude() {
 
   openclaudeProcess = proc;
   console.log(`[OpenClaude] Process spawned (pid: ${proc.pid})`);
+
+  // Inject recent conversation history on spawn for session recovery
+  try {
+    const db = memory.getDb();
+    if (db) {
+      const recentMessages = db.prepare(
+        'SELECT role, content, timestamp FROM messages ORDER BY id DESC LIMIT 20'
+      ).all().reverse();
+
+      if (recentMessages.length > 0) {
+        const history = recentMessages.map(m => {
+          const time = new Date(m.timestamp).toLocaleString('es-CR', {
+            month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
+          });
+          const name = m.role === 'user' ? 'Jose' : 'Maximus';
+          const shortContent = m.content.length > 300 ? m.content.substring(0, 300) + '...' : m.content;
+          return `[${time}] ${name}: ${shortContent}`;
+        }).join('\n');
+
+        // Wait a moment for the process to be ready, then inject context
+        setTimeout(() => {
+          if (openclaudeProcess === proc) {
+            const contextMsg = {
+              type: 'user',
+              session_id: '',
+              message: {
+                role: 'user',
+                content: `[SISTEMA - RECUPERACION DE SESION] Estos son los últimos ${recentMessages.length} mensajes de la conversación con Jose. Absorbé el contexto silenciosamente y respondé SOLO: "Listo, contexto recuperado."\n\n${history}`
+              },
+              parent_tool_use_id: null
+            };
+            proc.stdin.write(JSON.stringify(contextMsg) + '\n');
+            console.log(`[OpenClaude] Session recovery: ${recentMessages.length} messages injected`);
+          }
+        }, 2000);
+      }
+    }
+  } catch (e) {
+    console.error('[OpenClaude] Session recovery error:', e.message);
+  }
+
   return proc;
 }
 
@@ -288,7 +457,7 @@ function handleOpenClaudeMessage(msg) {
     if (pendingResolve) {
       const text = assistantText || (msg.result || '');
       assistantText = '';
-      if (pendingTimeout) { clearTimeout(pendingTimeout); pendingTimeout = null; }
+      if (pendingTimeout) { clearInterval(pendingTimeout); pendingTimeout = null; }
       const resolve = pendingResolve;
       pendingResolve = null;
       pendingReject = null;
@@ -317,30 +486,15 @@ async function callMaximus(userMessage, imageBase64 = null, imageMimeType = null
     throw new Error('OpenClaude is already processing a message');
   }
 
-  // Inject memory context + current model info as prefix
-  let contextPrefix = '';
-  try {
-    const ctx = memory.buildContext();
-    if (ctx) contextPrefix = ctx + '\n\n---\n\n';
-  } catch (e) {
-    console.error('[Memory] buildContext error:', e.message);
-  }
-  const provLabel = PROVIDERS[currentProvider]?.label || currentProvider;
-  const mdlInfo = PROVIDERS[currentProvider]?.models.find(m => m.id === currentModel);
-  const mdlLabel = mdlInfo ? mdlInfo.label : currentModel;
-  contextPrefix += `[Modelo actual: ${provLabel} / ${mdlLabel} (${currentModel})]\n`;
-  if (fastMode) contextPrefix += `[MODO RAPIDO: respondé lo más breve y directo posible, sin explicaciones extras]\n`;
-  contextPrefix += '\n';
-
-  // Build content
+  // Build content — NO context prefix, OpenClaude manages its own context natively
   let content;
   if (imageBase64) {
     content = [
       { type: 'image', source: { type: 'base64', media_type: imageMimeType, data: imageBase64 } },
-      { type: 'text', text: contextPrefix + userMessage }
+      { type: 'text', text: userMessage }
     ];
   } else {
-    content = contextPrefix + userMessage;
+    content = userMessage;
   }
 
   const inputMsg = {
@@ -355,16 +509,27 @@ async function callMaximus(userMessage, imageBase64 = null, imageMimeType = null
     pendingResolve = resolve;
     pendingReject = reject;
 
-    // Timeout safety
-    pendingTimeout = setTimeout(() => {
-      if (pendingReject) {
-        const rej = pendingReject;
-        pendingResolve = null;
-        pendingReject = null;
+    // Periodic "still working" notification instead of killing the process
+    const notifyStart = Date.now();
+    pendingTimeout = setInterval(() => {
+      const elapsed = Math.floor((Date.now() - notifyStart) / 1000);
+      const mins = Math.floor(elapsed / 60);
+      // Hard safety net: kill after 30 min (something is really stuck)
+      if (elapsed > OPENCLAUDE_HARD_TIMEOUT_MS / 1000) {
+        clearInterval(pendingTimeout);
         pendingTimeout = null;
-        rej(new Error('OpenClaude response timeout (5 min)'));
+        if (pendingReject) {
+          const rej = pendingReject;
+          pendingResolve = null;
+          pendingReject = null;
+          rej(new Error(`OpenClaude hard timeout (${mins} min)`));
+        }
+        return;
       }
-    }, OPENCLAUDE_TIMEOUT_MS);
+      // Send typing action so Jose sees it's alive
+      safeSendChatAction(ALLOWED_USER_ID, 'typing');
+      console.log(`[OpenClaude] Still working... (${mins}m ${elapsed % 60}s)`);
+    }, OPENCLAUDE_NOTIFY_INTERVAL_MS);
 
     openclaudeProcess.stdin.write(JSON.stringify(inputMsg) + '\n');
   });
@@ -481,6 +646,7 @@ class StatusCard {
 }
 
 const bot = new TelegramBot(TOKEN, { polling: true });
+global.telegramBot = bot;
 
 // Initialize persistent memory system
 memory.init();
@@ -594,6 +760,9 @@ function switchModel(providerId, modelId) {
 
 // Spawn OpenClaude on startup
 spawnOpenClaude();
+
+// Connect to Mission Control
+setTimeout(connectToMC, 3000);
 
 // --- Model page builder (4 rows of 2, with next/prev) ---
 const MODELS_PER_PAGE = 8; // 4 rows × 2 columns
@@ -1064,6 +1233,7 @@ bot.onText(/\/btw (.+)/s, async (msg, match) => {
   const spawnEnv = { ...process.env, HOME: '/app', ...btwProvider.env };
   const btwProc = spawn('openclaude', [
     '-p',
+    '--verbose',
     '--input-format', 'stream-json',
     '--output-format', 'stream-json',
     '--dangerously-skip-permissions',
@@ -1197,7 +1367,7 @@ bot.onText(/\/cancel$/, async (msg) => {
     const rej = pendingReject;
     pendingResolve = null;
     pendingReject = null;
-    if (pendingTimeout) { clearTimeout(pendingTimeout); pendingTimeout = null; }
+    if (pendingTimeout) { clearInterval(pendingTimeout); pendingTimeout = null; }
     if (rej) rej(new Error('Cancelled by user'));
   }
 
@@ -1295,7 +1465,7 @@ bot.onText(/\/clear$/, async (msg) => {
     const rej = pendingReject;
     pendingResolve = null;
     pendingReject = null;
-    if (pendingTimeout) { clearTimeout(pendingTimeout); pendingTimeout = null; }
+    if (pendingTimeout) { clearInterval(pendingTimeout); pendingTimeout = null; }
     rej(new Error('Session cleared'));
   }
   processingStartTime = null;
@@ -1442,6 +1612,7 @@ bot.onText(/\/summary$/, async (msg) => {
   const spawnEnv = { ...process.env, HOME: '/app', ...btwProvider.env };
   const summaryProc = spawn('openclaude', [
     '-p',
+    '--verbose',
     '--input-format', 'stream-json',
     '--output-format', 'stream-json',
     '--dangerously-skip-permissions',
@@ -1490,14 +1661,10 @@ bot.onText(/\/summary$/, async (msg) => {
     if (!resolved) { resolved = true; bot.sendMessage(chatId, '❌ Summary terminó sin respuesta.'); }
   });
 
-  // Build context for summary
-  let ctx = '';
-  try { ctx = memory.buildContext(); } catch (e) {}
-
   const inputMsg = {
     type: 'user',
     session_id: '',
-    message: { role: 'user', content: `${ctx ? ctx + '\n\n' : ''}Hacé un resumen ejecutivo breve de lo que hemos estado trabajando, basándote en el contexto de memoria disponible. Máximo 5-8 bullet points. Solo hechos, sin introducción.` },
+    message: { role: 'user', content: 'Hacé un resumen ejecutivo breve de lo que hemos estado trabajando. Máximo 5-8 bullet points. Solo hechos, sin introducción.' },
     parent_tool_use_id: null
   };
   summaryProc.stdin.write(JSON.stringify(inputMsg) + '\n');
@@ -1612,6 +1779,84 @@ ${history}
   } catch (err) {
     await bot.sendMessage(chatId, `❌ Error cargando mensajes: ${err.message.substring(0, 200)}`);
     console.error('[Mensajes] Error:', err.message);
+  }
+});
+
+// --- /equipo command — ver estado del equipo en Mission Control ---
+bot.onText(/\/equipo$/, async (msg) => {
+  if (!isAllowed(msg)) return;
+  const chatId = msg.chat.id;
+  if (!MC_API_KEY) { await bot.sendMessage(chatId, '❌ Mission Control no configurado.'); return; }
+  try {
+    const [agentsRes, tasksRes] = await Promise.all([
+      mcRequest('/api/agents', 'GET'),
+      mcRequest('/api/tasks', 'GET')
+    ]);
+    const agents = agentsRes.body.agents || [];
+    const tasks = tasksRes.body.tasks || [];
+    const pending = tasks.filter(t => t.status === 'in_progress').length;
+    const done = tasks.filter(t => t.status === 'done').length;
+    const inbox = tasks.filter(t => t.status === 'inbox').length;
+
+    let text = `🏢 <b>Estado del Equipo</b>\n\n`;
+    for (const a of agents) {
+      const icon = a.status === 'online' ? '🟢' : '🔴';
+      text += `${icon} <b>${a.name}</b> — ${a.role}\n`;
+    }
+    text += `\n📊 <b>Tareas</b>\n`;
+    text += `  • 📥 Inbox: ${inbox}\n`;
+    text += `  • ⚡ En progreso: ${pending}\n`;
+    text += `  • ✅ Completadas: ${done}\n`;
+    text += `\n🌐 <a href="http://76.13.119.13:3000">Ver dashboard</a>`;
+    await bot.sendMessage(chatId, text, { parse_mode: 'HTML' });
+  } catch (e) {
+    await bot.sendMessage(chatId, `❌ Error: ${e.message}`);
+  }
+});
+
+// --- /tarea command — crear tarea en Mission Control ---
+bot.onText(/\/tarea (.+)/, async (msg, match) => {
+  if (!isAllowed(msg)) return;
+  const chatId = msg.chat.id;
+  const input = match[1].trim();
+  if (!MC_API_KEY) { await bot.sendMessage(chatId, '❌ Mission Control no configurado.'); return; }
+
+  // Formato: /tarea [agente] título de la tarea
+  // Ejemplo: /tarea optimus Crear landing page
+  const parts = input.split(' ');
+  let assignTo = null;
+  let title = input;
+
+  // Verificar si el primer word es un agente conocido
+  const knownAgents = ['optimus', 'maximus'];
+  if (knownAgents.includes(parts[0].toLowerCase())) {
+    assignTo = parts[0].toLowerCase();
+    title = parts.slice(1).join(' ');
+  }
+
+  try {
+    let agentId = null;
+    if (assignTo) {
+      const agentsRes = await mcRequest('/api/agents', 'GET');
+      const agent = (agentsRes.body.agents || []).find(a => a.name === assignTo);
+      if (agent) agentId = agent.id;
+    }
+
+    const taskBody = { title, priority: 'high', status: agentId ? 'assigned' : 'inbox' };
+    if (agentId) taskBody.agent_id = agentId;
+
+    const res = await mcRequest('/api/tasks', 'POST', taskBody);
+    if (res.status === 201 && res.body.task) {
+      const t = res.body.task;
+      await bot.sendMessage(chatId,
+        `✅ <b>Tarea creada</b> (ID: ${t.id})\n📋 ${t.title}\n${agentId ? `👤 Asignada a: <b>${assignTo}</b>` : '📥 En inbox (sin asignar)'}`,
+        { parse_mode: 'HTML' }
+      );
+    } else {
+      await bot.sendMessage(chatId, `❌ Error creando tarea: ${JSON.stringify(res.body)}`);
+    }
+  } catch (e) {
+    await bot.sendMessage(chatId, `❌ Error: ${e.message}`);
   }
 });
 
