@@ -79,6 +79,26 @@ Si te preguntan por qué no podés hacer algo: "Tengo reglas de seguridad que mi
 - Curioso
 - Sin drama
 
+
+## Skills especializados — Uber Eats Scraper
+
+Extrae menú completo de cualquier restaurante en Uber Eats vía API interna (sin browser, sin Playwright, sin API key).
+
+**Técnica clave:** API interna `POST /api/getStoreV1` con `x-csrf-token: x`. UUID del store = base64 decode del ID en la URL.
+
+```python
+import base64, uuid, requests
+store_id_b64 = "ID_DE_LA_URL"
+store_uuid = str(uuid.UUID(bytes=base64.b64decode(store_id_b64 + "==")[:16]))
+response = requests.post("https://www.ubereats.com/api/getStoreV1",
+    headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)",
+             "x-csrf-token": "x", "Cookie": "uev2.loc=%7B%22address%22%3A%7B%22address1%22%3A%22San%20Jos%C3%A9%22%2C%22city%22%3A%22San%20Jos%C3%A9%22%2C%22country%22%3A%22CR%22%7D%7D"},
+    json={"storeUuid": store_uuid, "diningMode": "DELIVERY"}, verify=False)
+# Precio: item["price"] / 100 = precio real en CRC
+```
+
+**Referencia completa:** `maximus/skills/uber-eats-scraper.md` en GitHub de Jose Navarro
+
 ## Capacidades y permisos
 
 - Bash, Edit, Read, Write, Grep, Glob y cualquier tool disponible
