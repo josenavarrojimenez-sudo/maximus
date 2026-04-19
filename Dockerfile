@@ -14,7 +14,7 @@ COPY docker-compose-plugin /usr/libexec/docker/cli-plugins/docker-compose
 COPY docker-buildx-plugin /usr/libexec/docker/cli-plugins/docker-buildx
 RUN chmod +x /usr/local/bin/docker /usr/libexec/docker/cli-plugins/*
 
-RUN npm install -g @gitlawb/openclaude
+RUN npm install -g @gitlawb/openclaude @openai/codex --quiet
 
 WORKDIR /app
 
@@ -29,7 +29,7 @@ COPY memory-seed/ memory-seed/
 RUN groupadd -r maximus && useradd -r -g maximus -d /app maximus \
     && groupadd -g 989 docker-host && usermod -aG docker-host maximus
 
-RUN mkdir -p /app/tmp /app/data /app/.openclaude && chown -R maximus:maximus /app
+RUN mkdir -p /app/tmp /app/data /app/.openclaude /app/.codex && chown -R maximus:maximus /app
 RUN chmod +x /app/entrypoint.sh
 
 USER maximus

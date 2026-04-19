@@ -155,9 +155,18 @@ const PROVIDERS = {
   anthropic: {
     label: 'Anthropic',
     models: [
+      { id: 'claude-opus-4-7', label: 'Opus 4.7' },
       { id: 'sonnet', label: 'Sonnet 4.6' },
       { id: 'opus', label: 'Opus 4.6' },
       { id: 'haiku', label: 'Haiku 4.5' }
+    ],
+    env: {}
+  },
+  codex: {
+    label: 'OpenAI Codex',
+    models: [
+      { id: 'gpt-5.4', label: 'GPT-5.4 (default)' },
+      { id: 'gpt-5.4-mini', label: 'GPT-5.4 Mini' }
     ],
     env: {}
   },
@@ -292,6 +301,73 @@ const PROVIDERS = {
 let currentProvider = 'anthropic';
 let currentModel = process.env.OPENCLAUDE_MODEL || 'sonnet';
 
+// --- Proactive session rotation ---
+const SESSION_ROTATE_TURNS = 50;
+let turnCount = 0;
+
+// --- Host Delegation ---
+const DELEGATION_HOST = process.env.DELEGATION_HOST || 'http://host.docker.internal:3847';
+const DELEGATION_TIMEOUT_MS = 5 * 60 * 1000; // 5 min
+
+function delegateToHost(task, context) {
+  return new Promise((resolve, reject) => {
+    const payload = JSON.stringify({ task, context, timeout_ms: DELEGATION_TIMEOUT_MS });
+    const url = new URL(`${DELEGATION_HOST}/delegate`);
+    const http = require('http');
+
+    const req = http.request({
+      hostname: url.hostname,
+      port: url.port,
+      path: url.pathname,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
+      timeout: DELEGATION_TIMEOUT_MS + 10000
+    }, (res) => {
+      let data = '';
+      res.on('data', (chunk) => { data += chunk; });
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          resolve(parsed.success ? parsed.result : `[ERROR] ${parsed.error}`);
+        } catch (e) { resolve(data); }
+      });
+    });
+
+    req.on('error', (err) => resolve(`[ERROR] Delegación falló: ${err.message}`));
+    req.on('timeout', () => { req.destroy(); resolve('[ERROR] Delegación timeout'); });
+    req.write(payload);
+    req.end();
+  });
+}
+
+const DELEGATE_REGEX = /\[DELEGATE\]([\s\S]*?)\[\/DELEGATE\]/;
+
+async function handleDelegation(rawResponse) {
+  const match = rawResponse.match(DELEGATE_REGEX);
+  if (!match) return rawResponse;
+
+  const delegationTask = match[1].trim();
+  console.log(`[Delegation] Detected delegation request: ${delegationTask.substring(0, 100)}...`);
+
+  // Get last few messages for context
+  let context = '';
+  try {
+    const db = memory.getDb();
+    if (db) {
+      const recent = db.prepare('SELECT role, content FROM messages ORDER BY id DESC LIMIT 5').all().reverse();
+      context = recent.map(m => `${m.role}: ${m.content.substring(0, 200)}`).join('\n');
+    }
+  } catch (e) { /* no context */ }
+
+  const hostResult = await delegateToHost(delegationTask, context);
+  console.log(`[Delegation] Host result: ${hostResult.length} chars`);
+
+  // Inject result back into OpenClaude
+  const resultMsg = `[RESULTADO DEL HOST - OpenClaude ejecutó esta tarea en el servidor principal]\n\n${hostResult}\n\nFormateá este resultado para Jose y respondé normalmente.`;
+  const finalResponse = await callMaximus(resultMsg);
+  return finalResponse;
+}
+
 // --- BTW (side-channel) config ---
 const BTW_PROVIDER = process.env.BTW_PROVIDER || 'ollama';
 const BTW_MODEL = process.env.BTW_MODEL || 'gemma4:31b-cloud';
@@ -324,6 +400,7 @@ const OPENCLAUDE_HARD_TIMEOUT_MS = 30 * 60 * 1000; // 30 min hard safety net
 const OPENCLAUDE_NOTIFY_INTERVAL_MS = 3 * 60 * 1000; // 3 min notify interval
 
 function spawnOpenClaude() {
+  if (currentProvider === 'codex') return; // codex usa spawn por llamada, no proceso persistente
   const provider = PROVIDERS[currentProvider];
   console.log(`[OpenClaude] Spawning: ${provider.label} / ${currentModel}`);
 
@@ -396,7 +473,7 @@ function spawnOpenClaude() {
     const db = memory.getDb();
     if (db) {
       const recentMessages = db.prepare(
-        'SELECT role, content, timestamp FROM messages ORDER BY id DESC LIMIT 20'
+        'SELECT role, content, timestamp FROM messages ORDER BY id DESC LIMIT 10'
       ).all().reverse();
 
       if (recentMessages.length > 0) {
@@ -405,7 +482,7 @@ function spawnOpenClaude() {
             month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
           });
           const name = m.role === 'user' ? 'Jose' : 'Maximus';
-          const shortContent = m.content.length > 300 ? m.content.substring(0, 300) + '...' : m.content;
+          const shortContent = m.content.length > 150 ? m.content.substring(0, 150) + '...' : m.content;
           return `[${time}] ${name}: ${shortContent}`;
         }).join('\n');
 
@@ -417,7 +494,7 @@ function spawnOpenClaude() {
               session_id: '',
               message: {
                 role: 'user',
-                content: `[SISTEMA - RECUPERACION DE SESION] Estos son los últimos ${recentMessages.length} mensajes de la conversación con Jose. Absorbé el contexto silenciosamente y respondé SOLO: "Listo, contexto recuperado."\n\n${history}`
+                content: `[SISTEMA - RECUPERACION DE SESION] Estos son los últimos ${recentMessages.length} mensajes de la conversación con Jose. Absorbé el contexto silenciosamente y respondé SOLO: "ok"\n\n${history}`
               },
               parent_tool_use_id: null
             };
@@ -464,21 +541,82 @@ function handleOpenClaudeMessage(msg) {
       if (msg.is_error) {
         console.error(`[OpenClaude] Turn error: ${text.substring(0, 200)}`);
         // Auth error → kill and respawn, reject so caller can retry
-        if (text.includes('Not logged in') || text.includes('Please run /login')) {
+        if (text.includes('Not logged in') || text.includes('Please run /login') || text.includes('authentication_error') || text.includes('Invalid authentication credentials')) {
           console.error('[OpenClaude] Auth error detected — killing process for respawn');
           intentionalKill = true;
           if (openclaudeProcess) openclaudeProcess.kill('SIGTERM');
           resolve('[ERROR:AUTH] Maximus se está reiniciando, intentá de nuevo en unos segundos.');
           return;
         }
+        if (text.includes('context limit') || text.includes('compaction has failed') || text.includes('automatic compaction')) {
+          console.error('[OpenClaude] Context limit reached — killing process for fresh session');
+          intentionalKill = true;
+          if (openclaudeProcess) openclaudeProcess.kill('SIGTERM');
+          resolve('Se llenó el contexto, me estoy reiniciando con sesión nueva. Repetí tu mensaje en unos segundos.');
+          return;
+        }
       }
       console.log(`[OpenClaude] Response received (${text.length} chars)`);
+      turnCount++;
+      // Proactive session rotation to prevent context overflow
+      if (turnCount >= SESSION_ROTATE_TURNS) {
+        console.log(`[OpenClaude] Proactive session rotation after ${turnCount} turns`);
+        turnCount = 0;
+        intentionalKill = true;
+        resolve(text);
+        setTimeout(() => {
+          if (openclaudeProcess) openclaudeProcess.kill('SIGTERM');
+        }, 500);
+        return;
+      }
       resolve(text);
     }
   }
 }
 
+async function callCodex(userMessage) {
+  // Leer CLAUDE.md para inyectar personalidad/formato al prompt
+  let systemContext = '';
+  try {
+    systemContext = fs.readFileSync('/app/CLAUDE.md', 'utf8').trim();
+  } catch (e) { /* no CLAUDE.md, continuar sin contexto */ }
+
+  const fullPrompt = systemContext
+    ? `[INSTRUCCIONES DEL SISTEMA - seguí estas reglas para tu respuesta]:\n${systemContext}\n\n[MENSAJE DEL USUARIO]:\n${userMessage}`
+    : userMessage;
+
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('Codex timeout (5 min)')), 5 * 60 * 1000);
+    let output = '';
+    const modelArgs = (currentModel && currentModel !== 'gpt-5.4') ? ['--model', currentModel] : [];
+    const proc = spawn('codex', ['exec', '--skip-git-repo-check', ...modelArgs, fullPrompt], {
+      cwd: '/app',
+      env: { ...process.env, HOME: '/app' },
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    proc.stdout.on('data', d => { output += d.toString(); });
+    proc.stderr.on('data', d => { output += d.toString(); });
+    proc.on('close', code => {
+      clearTimeout(timeout);
+      const lines = output.split('\n').map(l => l.trim()).filter(Boolean);
+      const codexIdx = lines.lastIndexOf('codex');
+      const tokensIdx = lines.indexOf('tokens used', codexIdx);
+      let result = '';
+      if (codexIdx >= 0 && tokensIdx > codexIdx) {
+        result = lines.slice(codexIdx + 1, tokensIdx).join('\n');
+      } else {
+        const skip = new Set(['codex', 'tokens used', 'user', 'EXIT:0']);
+        result = lines.filter(l => !skip.has(l) && !/^\d[,\d]*$/.test(l) && !l.startsWith('---') && !l.startsWith('WARNING') && !l.startsWith('ERROR') && !l.startsWith('OpenAI') && !l.startsWith('workdir') && !l.startsWith('model:') && !l.startsWith('session') && !l.startsWith('sandbox') && !l.startsWith('approval') && !l.startsWith('reasoning') && !l.startsWith('provider')).pop() || '';
+      }
+      if (result) resolve(result);
+      else reject(new Error(`Codex sin respuesta: ${output.slice(0, 300)}`));
+    });
+    proc.on('error', e => { clearTimeout(timeout); reject(e); });
+  });
+}
+
 async function callMaximus(userMessage, imageBase64 = null, imageMimeType = null) {
+  if (currentProvider === 'codex') return callCodex(userMessage);
   if (!openclaudeProcess) {
     throw new Error('OpenClaude process not running');
   }
@@ -1941,7 +2079,8 @@ bot.on('message', async (msg) => {
         }
 
         await status.advance(); // → Pensando
-        const rawResponse = await callMaximus(`[Este mensaje viene de un audio de Jose] ${transcription}`);
+        let rawResponse = await callMaximus(`[Este mensaje viene de un audio de Jose] ${transcription}`);
+        rawResponse = await handleDelegation(rawResponse);
 
         const formatMatch = rawResponse.match(/^\[(AUDIO|TEXTO)\]\s*/i);
         const outputFormat = formatMatch ? formatMatch[1].toUpperCase() : 'AUDIO';
@@ -2010,7 +2149,8 @@ bot.on('message', async (msg) => {
           : '[IMAGEN enviada por Jose] Sin caption. Respondé en base a lo que ves en la imagen.';
 
         await status.advance(); // → Pensando
-        const rawResponse = await callMaximus(imgMessage, imageBase64, mimeType);
+        let rawResponse = await callMaximus(imgMessage, imageBase64, mimeType);
+        rawResponse = await handleDelegation(rawResponse);
 
         const formatMatch = rawResponse.match(/^\[(AUDIO|TEXTO)\]\s*/i);
         const outputFormat = formatMatch ? formatMatch[1].toUpperCase() : 'TEXTO';
@@ -2073,7 +2213,8 @@ async function handleTextMessage(chatId, text, timestamp) {
     processingStartTime = Date.now();
     currentProcessingText = text.substring(0, 100);
     await status.advance(); // → Pensando
-    const rawResponse = await callMaximus(text);
+    let rawResponse = await callMaximus(text);
+    rawResponse = await handleDelegation(rawResponse);
 
     const formatMatch = rawResponse.match(/^\[(AUDIO|TEXTO)\]\s*/i);
     const outputFormat = formatMatch ? formatMatch[1].toUpperCase() : 'TEXTO';

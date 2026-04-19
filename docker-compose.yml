@@ -9,7 +9,8 @@ services:
     group_add:
       - "989"
     volumes:
-      - /root/.openclaude/.credentials.json:/app/.openclaude/.credentials.json
+      - /root/.openclaude-creds:/app/.openclaude-creds:ro
+      - /root/.codex-creds:/app/.codex-creds:ro
       - /root/.openclaude/projects/-root/memory:/app/.openclaude/projects/-app/memory:ro
       - /root/maximus-data:/app/data
       - /root/maximus-sessions:/app/.claude
@@ -18,6 +19,8 @@ services:
       - /root/.openclaude/plugins:/app/.openclaude/plugins
     tmpfs:
       - /app/tmp:uid=999,gid=999
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - agents-net
 
