@@ -165,6 +165,26 @@ const PROVIDERS = {
 let currentProvider = 'anthropic';
 let currentModel = process.env.OPENCLAUDE_MODEL || 'sonnet';
 
+// --- BTW (side-channel) config ---
+const BTW_PROVIDER = process.env.BTW_PROVIDER || 'ollama';
+const BTW_MODEL = process.env.BTW_MODEL || 'gemma4:31b-cloud';
+const BTW_TIMEOUT_MS = 60 * 1000; // 60 seconds
+
+// --- State tracking ---
+const botStartTime = Date.now();
+let processingStartTime = null;
+let currentProcessingText = null;
+
+// --- Cost tracking ---
+let sessionTokensIn = 0;
+let sessionTokensOut = 0;
+let sessionCostUsd = 0;
+let sessionMessages = 0;
+
+// --- Effort & Fast mode ---
+let currentEffort = 'auto'; // low, medium, high, max, auto
+let fastMode = false;
+
 // --- OpenClaude CLI Subprocess (persistent stream-json mode) ---
 let openclaudeProcess = null;
 let pendingResolve = null;
@@ -181,14 +201,17 @@ function spawnOpenClaude() {
 
   const spawnEnv = { ...process.env, HOME: '/app', ...provider.env };
 
-  const proc = spawn('openclaude', [
+  const spawnArgs = [
     '-p',
     '--verbose',
     '--input-format', 'stream-json',
     '--output-format', 'stream-json',
     '--dangerously-skip-permissions',
     '--model', currentModel
-  ], {
+  ];
+  if (currentEffort !== 'auto') spawnArgs.push('--effort', currentEffort);
+
+  const proc = spawn('openclaude', spawnArgs, {
     cwd: '/app',
     stdio: ['pipe', 'pipe', 'pipe'],
     env: spawnEnv
@@ -252,6 +275,15 @@ function handleOpenClaudeMessage(msg) {
       assistantText = textParts.join('');
     }
   } else if (msg.type === 'result') {
+    // Track usage/cost if available
+    if (msg.usage) {
+      sessionTokensIn += msg.usage.input_tokens || 0;
+      sessionTokensOut += msg.usage.output_tokens || 0;
+    }
+    if (msg.cost_usd) sessionCostUsd += msg.cost_usd;
+    if (msg.total_cost_usd) sessionCostUsd = msg.total_cost_usd;
+    sessionMessages++;
+
     // Turn complete — resolve the pending promise
     if (pendingResolve) {
       const text = assistantText || (msg.result || '');
@@ -296,7 +328,9 @@ async function callMaximus(userMessage, imageBase64 = null, imageMimeType = null
   const provLabel = PROVIDERS[currentProvider]?.label || currentProvider;
   const mdlInfo = PROVIDERS[currentProvider]?.models.find(m => m.id === currentModel);
   const mdlLabel = mdlInfo ? mdlInfo.label : currentModel;
-  contextPrefix += `[Modelo actual: ${provLabel} / ${mdlLabel} (${currentModel})]\n\n`;
+  contextPrefix += `[Modelo actual: ${provLabel} / ${mdlLabel} (${currentModel})]\n`;
+  if (fastMode) contextPrefix += `[MODO RAPIDO: respondé lo más breve y directo posible, sin explicaciones extras]\n`;
+  contextPrefix += '\n';
 
   // Build content
   let content;
@@ -1008,6 +1042,617 @@ function escapeHtml(text) {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+// --- /btw command (side-channel quick question) ---
+bot.onText(/\/btw (.+)/s, async (msg, match) => {
+  if (!isAllowed(msg)) return;
+  const chatId = msg.chat.id;
+  const question = match[1].trim();
+  if (!question) {
+    await bot.sendMessage(chatId, '💡 Uso: /btw <tu pregunta rápida>');
+    return;
+  }
+
+  console.log(`[BTW] Pregunta rápida: "${question.substring(0, 80)}"`);
+  safeSendChatAction(chatId, 'typing');
+
+  const btwProvider = PROVIDERS[BTW_PROVIDER];
+  if (!btwProvider) {
+    await bot.sendMessage(chatId, `❌ Provider BTW no configurado: ${BTW_PROVIDER}`);
+    return;
+  }
+
+  const spawnEnv = { ...process.env, HOME: '/app', ...btwProvider.env };
+  const btwProc = spawn('openclaude', [
+    '-p',
+    '--input-format', 'stream-json',
+    '--output-format', 'stream-json',
+    '--dangerously-skip-permissions',
+    '--model', BTW_MODEL
+  ], {
+    cwd: '/app',
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: spawnEnv
+  });
+
+  let btwBuffer = '';
+  let btwText = '';
+  let resolved = false;
+
+  const timeout = setTimeout(() => {
+    if (!resolved) {
+      resolved = true;
+      btwProc.kill('SIGTERM');
+      bot.sendMessage(chatId, '⏱ BTW timeout — la pregunta tardó demasiado.');
+    }
+  }, BTW_TIMEOUT_MS);
+
+  btwProc.stdout.on('data', (chunk) => {
+    btwBuffer += chunk.toString();
+    const lines = btwBuffer.split('\n');
+    btwBuffer = lines.pop();
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const msg = JSON.parse(line);
+        if (msg.type === 'assistant' && msg.message?.content) {
+          const parts = msg.message.content.filter(c => c.type === 'text').map(c => c.text);
+          if (parts.length > 0) btwText = parts.join('');
+        } else if (msg.type === 'result' && !resolved) {
+          resolved = true;
+          clearTimeout(timeout);
+          const response = btwText || msg.result || '(sin respuesta)';
+          const clean = response.replace(/^\[(AUDIO|TEXTO)\]\s*/i, '').trim();
+          console.log(`[BTW] Respuesta: ${clean.length} chars`);
+          sendTextResponse(chatId, `💡 *BTW:*\n${clean}`).catch(() => {
+            bot.sendMessage(chatId, `💡 BTW:\n${clean}`);
+          });
+          btwProc.kill('SIGTERM');
+        }
+      } catch (e) { /* not JSON */ }
+    }
+  });
+
+  btwProc.stderr.on('data', (chunk) => {
+    const text = chunk.toString().trim();
+    if (text) console.error(`[BTW stderr] ${text}`);
+  });
+
+  btwProc.on('exit', () => {
+    clearTimeout(timeout);
+    if (!resolved) {
+      resolved = true;
+      bot.sendMessage(chatId, '❌ BTW process terminó sin respuesta.');
+    }
+  });
+
+  // Send the question
+  const inputMsg = {
+    type: 'user',
+    session_id: '',
+    message: { role: 'user', content: `Respondé de forma MUY breve y directa (máximo 2-3 oraciones). Pregunta: ${question}` },
+    parent_tool_use_id: null
+  };
+  btwProc.stdin.write(JSON.stringify(inputMsg) + '\n');
+});
+
+// --- /status command ---
+bot.onText(/\/status$/, async (msg) => {
+  if (!isAllowed(msg)) return;
+  const chatId = msg.chat.id;
+
+  const uptime = Date.now() - botStartTime;
+  const uptimeStr = formatUptime(uptime);
+  const provider = PROVIDERS[currentProvider];
+  const modelInfo = provider.models.find(m => m.id === currentModel);
+  const modelLabel = modelInfo ? modelInfo.label : currentModel;
+  const queueSize = messageQueue.length;
+  const isProcessing = !!processingStartTime;
+
+  let statusText = `📊 <b>Estado de Maximus</b>\n\n`;
+  statusText += `🤖 <b>Modelo:</b> ${provider.label} / ${modelLabel}\n`;
+  statusText += `⏱ <b>Uptime:</b> ${uptimeStr}\n`;
+  statusText += `📬 <b>Cola:</b> ${queueSize} mensaje${queueSize !== 1 ? 's' : ''}\n`;
+
+  if (isProcessing) {
+    const elapsed = Math.floor((Date.now() - processingStartTime) / 1000);
+    statusText += `\n⚡ <b>Procesando</b> (${elapsed}s)\n`;
+    if (currentProcessingText) {
+      statusText += `📝 <i>"${escapeHtml(currentProcessingText)}${currentProcessingText.length >= 100 ? '...' : ''}"</i>\n`;
+    }
+  } else {
+    statusText += `\n😎 <b>Idle</b> — listo para trabajar\n`;
+  }
+
+  statusText += `\n💡 BTW: ${PROVIDERS[BTW_PROVIDER]?.label || BTW_PROVIDER} / ${BTW_MODEL}`;
+
+  await bot.sendMessage(chatId, statusText, { parse_mode: 'HTML' });
+});
+
+function formatUptime(ms) {
+  const secs = Math.floor(ms / 1000);
+  const mins = Math.floor(secs / 60);
+  const hours = Math.floor(mins / 60);
+  const days = Math.floor(hours / 24);
+  if (days > 0) return `${days}d ${hours % 24}h ${mins % 60}m`;
+  if (hours > 0) return `${hours}h ${mins % 60}m`;
+  return `${mins}m ${secs % 60}s`;
+}
+
+// --- /cancel command ---
+bot.onText(/\/cancel$/, async (msg) => {
+  if (!isAllowed(msg)) return;
+  const chatId = msg.chat.id;
+
+  if (!processingStartTime && messageQueue.length === 0) {
+    await bot.sendMessage(chatId, '😎 No hay nada que cancelar — estoy idle.');
+    return;
+  }
+
+  const queueCleared = messageQueue.length;
+  messageQueue.length = 0; // vaciar cola
+
+  if (pendingResolve) {
+    // Reject pending promise so handleTextMessage's catch fires
+    const rej = pendingReject;
+    pendingResolve = null;
+    pendingReject = null;
+    if (pendingTimeout) { clearTimeout(pendingTimeout); pendingTimeout = null; }
+    if (rej) rej(new Error('Cancelled by user'));
+  }
+
+  // Kill and respawn
+  intentionalKill = true;
+  if (openclaudeProcess) {
+    openclaudeProcess.kill('SIGTERM');
+  }
+
+  processingStartTime = null;
+  currentProcessingText = null;
+
+  let cancelMsg = '🛑 Operación cancelada.';
+  if (queueCleared > 0) cancelMsg += ` ${queueCleared} mensaje${queueCleared > 1 ? 's' : ''} en cola eliminado${queueCleared > 1 ? 's' : ''}.`;
+  cancelMsg += ' Listo para nuevas instrucciones.';
+
+  await bot.sendMessage(chatId, cancelMsg);
+  console.log(`[Cancel] Operación cancelada por Jose. Cola limpiada: ${queueCleared}`);
+});
+
+// --- /compact command (native OpenClaude compact) ---
+bot.onText(/\/compact(?:\s+(.+))?$/s, async (msg, match) => {
+  if (!isAllowed(msg)) return;
+  const chatId = msg.chat.id;
+  const instructions = match?.[1]?.trim();
+
+  if (!openclaudeProcess) {
+    await bot.sendMessage(chatId, '❌ Proceso OpenClaude no está corriendo.');
+    return;
+  }
+
+  if (processingStartTime) {
+    await bot.sendMessage(chatId, '⏳ Esperá a que termine la tarea actual o usá /cancel primero.');
+    return;
+  }
+
+  await bot.sendMessage(chatId, '🧹 Compactando contexto...');
+
+  // Send /compact as a user message — OpenClaude handles it natively
+  const compactCmd = instructions ? `/compact ${instructions}` : '/compact';
+  const inputMsg = {
+    type: 'user',
+    session_id: '',
+    message: { role: 'user', content: compactCmd },
+    parent_tool_use_id: null
+  };
+
+  // Listen for compact_boundary event
+  const compactListener = (chunk) => {
+    const lines = chunk.toString().split('\n');
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const parsed = JSON.parse(line);
+        if (parsed.type === 'system' && parsed.subtype === 'compact_boundary') {
+          const preTokens = parsed.compact_metadata?.pre_tokens || '?';
+          bot.sendMessage(chatId, `✅ Contexto compactado (${preTokens} tokens comprimidos). Memoria y resumen preservados.`);
+          openclaudeProcess.stdout.removeListener('data', compactListener);
+          console.log(`[Compact] Nativo completado. Pre-tokens: ${preTokens}`);
+        }
+      } catch (e) { /* not JSON */ }
+    }
+  };
+
+  openclaudeProcess.stdout.on('data', compactListener);
+
+  // Timeout: remove listener after 30s if no compact_boundary received
+  setTimeout(() => {
+    openclaudeProcess?.stdout.removeListener('data', compactListener);
+  }, 30000);
+
+  openclaudeProcess.stdin.write(JSON.stringify(inputMsg) + '\n');
+  console.log(`[Compact] Enviando compact nativo${instructions ? `: ${instructions}` : ''}`);
+});
+
+// --- /clear command (full reset) ---
+bot.onText(/\/clear$/, async (msg) => {
+  if (!isAllowed(msg)) return;
+  const chatId = msg.chat.id;
+
+  // Clear queue
+  messageQueue.length = 0;
+  batchBuffer = [];
+  if (batchTimer) { clearTimeout(batchTimer); batchTimer = null; }
+
+  // Reset cost tracking
+  sessionTokensIn = 0;
+  sessionTokensOut = 0;
+  sessionCostUsd = 0;
+  sessionMessages = 0;
+
+  // Kill and respawn
+  intentionalKill = true;
+  if (pendingReject) {
+    const rej = pendingReject;
+    pendingResolve = null;
+    pendingReject = null;
+    if (pendingTimeout) { clearTimeout(pendingTimeout); pendingTimeout = null; }
+    rej(new Error('Session cleared'));
+  }
+  processingStartTime = null;
+  currentProcessingText = null;
+  if (openclaudeProcess) openclaudeProcess.kill('SIGTERM');
+
+  await bot.sendMessage(chatId, '🔄 Sesión reiniciada completamente. Historial, cola y contadores en cero.');
+  console.log('[Clear] Sesión reiniciada por Jose');
+});
+
+// --- /cost command ---
+bot.onText(/\/cost$/, async (msg) => {
+  if (!isAllowed(msg)) return;
+  const chatId = msg.chat.id;
+  const uptime = formatUptime(Date.now() - botStartTime);
+
+  let costText = `💰 <b>Costos de sesión</b>\n\n`;
+  costText += `📊 <b>Mensajes:</b> ${sessionMessages}\n`;
+  if (sessionTokensIn > 0 || sessionTokensOut > 0) {
+    costText += `📥 <b>Tokens in:</b> ${sessionTokensIn.toLocaleString()}\n`;
+    costText += `📤 <b>Tokens out:</b> ${sessionTokensOut.toLocaleString()}\n`;
+    costText += `📦 <b>Total:</b> ${(sessionTokensIn + sessionTokensOut).toLocaleString()}\n`;
+  }
+  if (sessionCostUsd > 0) {
+    costText += `💵 <b>Costo:</b> $${sessionCostUsd.toFixed(4)} USD\n`;
+  }
+  costText += `\n⏱ <b>Uptime:</b> ${uptime}`;
+  costText += `\n🤖 <b>Modelo:</b> ${PROVIDERS[currentProvider]?.label} / ${currentModel}`;
+
+  await bot.sendMessage(chatId, costText, { parse_mode: 'HTML' });
+});
+
+// --- /effort command ---
+bot.onText(/\/effort(?:\s+(\w+))?$/, async (msg, match) => {
+  if (!isAllowed(msg)) return;
+  const chatId = msg.chat.id;
+  const level = match?.[1]?.toLowerCase();
+  const valid = ['low', 'medium', 'high', 'max', 'auto'];
+
+  if (!level) {
+    await bot.sendMessage(chatId,
+      `⚡ <b>Effort actual:</b> ${currentEffort}\n\nNiveles: <code>${valid.join(', ')}</code>\nUso: <code>/effort medium</code>`,
+      { parse_mode: 'HTML' });
+    return;
+  }
+
+  if (!valid.includes(level)) {
+    await bot.sendMessage(chatId, `❌ Nivel inválido. Opciones: ${valid.join(', ')}`);
+    return;
+  }
+
+  currentEffort = level;
+  await bot.sendMessage(chatId, `⚡ Effort cambiado a <b>${level}</b>. Reiniciando proceso...`, { parse_mode: 'HTML' });
+  intentionalKill = true;
+  if (openclaudeProcess) openclaudeProcess.kill('SIGTERM');
+  console.log(`[Effort] Cambiado a ${level}`);
+});
+
+// --- /fast command (toggle) ---
+bot.onText(/\/fast$/, async (msg) => {
+  if (!isAllowed(msg)) return;
+  fastMode = !fastMode;
+  const emoji = fastMode ? '🐇' : '🐢';
+  await bot.sendMessage(msg.chat.id, `${emoji} Modo rápido: <b>${fastMode ? 'ON' : 'OFF'}</b>`, { parse_mode: 'HTML' });
+  console.log(`[Fast] Modo rápido: ${fastMode}`);
+});
+
+// --- /diff command ---
+bot.onText(/\/diff(?:\s+(.+))?$/, async (msg, match) => {
+  if (!isAllowed(msg)) return;
+  const chatId = msg.chat.id;
+  const targetPath = match?.[1]?.trim() || '/app';
+
+  try {
+    const { execSync } = require('child_process');
+    const diffOutput = execSync(`git -C "${targetPath}" diff --stat 2>&1 && echo "---FULL---" && git -C "${targetPath}" diff --no-color 2>&1`, {
+      timeout: 10000,
+      maxBuffer: 50 * 1024
+    }).toString();
+
+    if (!diffOutput.trim() || diffOutput.includes('not a git repository')) {
+      await bot.sendMessage(chatId, `📝 No hay cambios en <code>${escapeHtml(targetPath)}</code>`, { parse_mode: 'HTML' });
+      return;
+    }
+
+    const [stats, full] = diffOutput.split('---FULL---');
+    let response = `📝 <b>Diff</b> (<code>${escapeHtml(targetPath)}</code>)\n\n<pre>${escapeHtml(stats.trim())}</pre>`;
+
+    if (full?.trim()) {
+      const truncated = full.trim().substring(0, 3000);
+      response += `\n\n<pre><code>${escapeHtml(truncated)}${full.trim().length > 3000 ? '\n... (truncado)' : ''}</code></pre>`;
+    }
+
+    await bot.sendMessage(chatId, response, { parse_mode: 'HTML' }).catch(() => {
+      bot.sendMessage(chatId, `Diff en ${targetPath}:\n${stats}`);
+    });
+  } catch (err) {
+    await bot.sendMessage(chatId, `❌ Error: ${err.message.substring(0, 200)}`);
+  }
+});
+
+// --- /commit command ---
+bot.onText(/\/commit(?:\s+(.+))?$/s, async (msg, match) => {
+  if (!isAllowed(msg)) return;
+  const chatId = msg.chat.id;
+  const commitMsg = match?.[1]?.trim();
+
+  if (!commitMsg) {
+    await bot.sendMessage(chatId, '💡 Uso: <code>/commit mensaje del commit</code>', { parse_mode: 'HTML' });
+    return;
+  }
+
+  try {
+    const { execSync } = require('child_process');
+    // Check if there are changes
+    const status = execSync('git -C /app status --porcelain 2>&1', { timeout: 5000 }).toString().trim();
+    if (!status) {
+      await bot.sendMessage(chatId, '📝 No hay cambios para commitear.');
+      return;
+    }
+
+    execSync(`git -C /app add -A 2>&1`, { timeout: 5000 });
+    const result = execSync(`git -C /app commit -m "${commitMsg.replace(/"/g, '\\"')}" 2>&1`, { timeout: 10000 }).toString();
+
+    const filesChanged = (result.match(/(\d+) files? changed/) || ['', '?'])[1];
+    await bot.sendMessage(chatId,
+      `✅ Commit creado\n\n📝 <code>${escapeHtml(commitMsg)}</code>\n📁 ${filesChanged} archivo(s)`,
+      { parse_mode: 'HTML' });
+    console.log(`[Commit] ${commitMsg}`);
+  } catch (err) {
+    await bot.sendMessage(chatId, `❌ Error en commit: ${err.message.substring(0, 300)}`);
+  }
+});
+
+// --- /summary command ---
+bot.onText(/\/summary$/, async (msg) => {
+  if (!isAllowed(msg)) return;
+  const chatId = msg.chat.id;
+
+  safeSendChatAction(chatId, 'typing');
+
+  // Use btw-style temporary process for summary
+  const btwProvider = PROVIDERS[BTW_PROVIDER];
+  const spawnEnv = { ...process.env, HOME: '/app', ...btwProvider.env };
+  const summaryProc = spawn('openclaude', [
+    '-p',
+    '--input-format', 'stream-json',
+    '--output-format', 'stream-json',
+    '--dangerously-skip-permissions',
+    '--model', BTW_MODEL
+  ], { cwd: '/app', stdio: ['pipe', 'pipe', 'pipe'], env: spawnEnv });
+
+  let sBuffer = '';
+  let sText = '';
+  let resolved = false;
+
+  const timeout = setTimeout(() => {
+    if (!resolved) {
+      resolved = true;
+      summaryProc.kill('SIGTERM');
+      bot.sendMessage(chatId, '⏱ Summary timeout.');
+    }
+  }, BTW_TIMEOUT_MS);
+
+  summaryProc.stdout.on('data', (chunk) => {
+    sBuffer += chunk.toString();
+    const lines = sBuffer.split('\n');
+    sBuffer = lines.pop();
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const m = JSON.parse(line);
+        if (m.type === 'assistant' && m.message?.content) {
+          const parts = m.message.content.filter(c => c.type === 'text').map(c => c.text);
+          if (parts.length > 0) sText = parts.join('');
+        } else if (m.type === 'result' && !resolved) {
+          resolved = true;
+          clearTimeout(timeout);
+          const response = (sText || m.result || '(sin datos)').replace(/^\[(AUDIO|TEXTO)\]\s*/i, '').trim();
+          sendTextResponse(chatId, `📋 *Resumen:*\n${response}`).catch(() => {
+            bot.sendMessage(chatId, `📋 Resumen:\n${response}`);
+          });
+          summaryProc.kill('SIGTERM');
+        }
+      } catch (e) { /* not JSON */ }
+    }
+  });
+
+  summaryProc.stderr.on('data', () => {});
+  summaryProc.on('exit', () => {
+    clearTimeout(timeout);
+    if (!resolved) { resolved = true; bot.sendMessage(chatId, '❌ Summary terminó sin respuesta.'); }
+  });
+
+  // Build context for summary
+  let ctx = '';
+  try { ctx = memory.buildContext(); } catch (e) {}
+
+  const inputMsg = {
+    type: 'user',
+    session_id: '',
+    message: { role: 'user', content: `${ctx ? ctx + '\n\n' : ''}Hacé un resumen ejecutivo breve de lo que hemos estado trabajando, basándote en el contexto de memoria disponible. Máximo 5-8 bullet points. Solo hechos, sin introducción.` },
+    parent_tool_use_id: null
+  };
+  summaryProc.stdin.write(JSON.stringify(inputMsg) + '\n');
+});
+
+// --- /rewind command ---
+bot.onText(/\/rewind$/, async (msg) => {
+  if (!isAllowed(msg)) return;
+  const chatId = msg.chat.id;
+
+  if (processingStartTime) {
+    await bot.sendMessage(chatId, '⏳ Esperá a que termine la operación actual, o usá /cancel primero.');
+    return;
+  }
+
+  // Send a message to OpenClaude telling it to ignore the last exchange
+  try {
+    const response = await callMaximus('[SISTEMA] Ignorá completamente tu última respuesta y el último mensaje del usuario. Actuá como si ese intercambio nunca hubiera ocurrido. Respondé solo: "⏪ Último intercambio descartado."');
+    const clean = response.replace(/^\[(AUDIO|TEXTO)\]\s*/i, '').trim();
+    await bot.sendMessage(chatId, clean || '⏪ Último intercambio descartado.');
+  } catch (err) {
+    await bot.sendMessage(chatId, '❌ Error en rewind: ' + err.message.substring(0, 200));
+  }
+  console.log('[Rewind] Último intercambio descartado');
+});
+
+// --- /tasks command ---
+bot.onText(/\/tasks$/, async (msg) => {
+  if (!isAllowed(msg)) return;
+  const chatId = msg.chat.id;
+
+  let tasksText = `📋 <b>Estado de tareas</b>\n\n`;
+
+  // Current processing
+  if (processingStartTime) {
+    const elapsed = Math.floor((Date.now() - processingStartTime) / 1000);
+    tasksText += `⚡ <b>En proceso</b> (${elapsed}s)\n`;
+    if (currentProcessingText) {
+      tasksText += `   📝 <i>"${escapeHtml(currentProcessingText)}${currentProcessingText.length >= 100 ? '...' : ''}"</i>\n\n`;
+    }
+  } else {
+    tasksText += `😎 <b>Ninguna tarea activa</b>\n\n`;
+  }
+
+  // Queue
+  if (messageQueue.length > 0) {
+    tasksText += `📬 <b>Cola:</b> ${messageQueue.length} mensaje${messageQueue.length > 1 ? 's' : ''} esperando\n`;
+    messageQueue.forEach((handler, i) => {
+      const age = Math.floor((Date.now() - (handler._enqueuedAt || Date.now())) / 1000);
+      tasksText += `   ${i + 1}. Mensaje (esperando ${age}s)\n`;
+    });
+  } else {
+    tasksText += `📬 <b>Cola:</b> vacía`;
+  }
+
+  await bot.sendMessage(chatId, tasksText, { parse_mode: 'HTML' });
+});
+
+// --- /mensajes command (reload context from SQLite history) ---
+bot.onText(/\/mensajes(?:\s+(\d+))?$/, async (msg, match) => {
+  if (!isAllowed(msg)) return;
+  const chatId = msg.chat.id;
+  const count = Math.min(parseInt(match?.[1] || '50', 10), 500); // max 500
+
+  if (processingStartTime) {
+    await bot.sendMessage(chatId, '⏳ Esperá a que termine la tarea actual o usá /cancel primero.');
+    return;
+  }
+
+  if (!openclaudeProcess) {
+    await bot.sendMessage(chatId, '❌ Proceso OpenClaude no está corriendo.');
+    return;
+  }
+
+  try {
+    const db = memory.getDb();
+    const messages = db.prepare(
+      'SELECT role, content, timestamp FROM messages ORDER BY id DESC LIMIT ?'
+    ).all(count).reverse();
+
+    if (messages.length === 0) {
+      await bot.sendMessage(chatId, '📭 No hay mensajes guardados en el historial.');
+      return;
+    }
+
+    await bot.sendMessage(chatId, `📖 Cargando últimos ${messages.length} mensajes como contexto...`);
+    safeSendChatAction(chatId, 'typing');
+
+    // Format messages as conversation history
+    const history = messages.map(m => {
+      const time = new Date(m.timestamp).toLocaleString('es-CR', {
+        month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
+      });
+      const name = m.role === 'user' ? 'Jose' : 'Maximus';
+      return `[${time}] ${name}: ${m.content}`;
+    }).join('\n\n');
+
+    // Send as context to OpenClaude
+    const contextMsg = `[SISTEMA - RECARGA DE CONTEXTO]
+Jose te pide que leas y absorbas los últimos ${messages.length} mensajes de la conversación.
+Usá esta información para entender qué veníamos haciendo, decisiones tomadas, y estado actual del trabajo.
+NO respondas con un resumen largo — solo confirmá brevemente que entendés el contexto y qué estábamos haciendo.
+
+=== HISTORIAL (${messages.length} mensajes) ===
+${history}
+=== FIN DEL HISTORIAL ===`;
+
+    const response = await callMaximus(contextMsg);
+    const clean = response.replace(/^\[(AUDIO|TEXTO)\]\s*/i, '').trim();
+    await sendTextResponse(chatId, clean);
+    console.log(`[Mensajes] ${messages.length} mensajes cargados como contexto`);
+  } catch (err) {
+    await bot.sendMessage(chatId, `❌ Error cargando mensajes: ${err.message.substring(0, 200)}`);
+    console.error('[Mensajes] Error:', err.message);
+  }
+});
+
+// --- /help command ---
+bot.onText(/\/help$/, async (msg) => {
+  if (!isAllowed(msg)) return;
+  const helpText = `📋 <b>Comandos de Maximus</b>\n
+💬 <b>Mensajes</b>
+  • Texto directo — respuesta normal
+  • Audio — transcripción + respuesta
+  • Imagen — análisis visual
+
+🔧 <b>Control</b>
+  • <code>/btw pregunta</code> — pregunta rápida (funciona mientras estoy ocupado)
+  • <code>/status</code> — estado actual (modelo, cola, uptime)
+  • <code>/tasks</code> — tareas activas y cola
+  • <code>/cancel</code> — cancelar operación actual
+  • <code>/fast</code> — toggle modo rápido (respuestas breves)
+  • <code>/effort nivel</code> — nivel de esfuerzo (low/medium/high/max/auto)
+
+📝 <b>Sesión</b>
+  • <code>/compact [nota]</code> — compactar contexto (nativo)
+  • <code>/clear</code> — reinicio total de sesión
+  • <code>/mensajes [N]</code> — cargar últimos N mensajes como contexto (default: 50)
+  • <code>/rewind</code> — deshacer último intercambio
+  • <code>/summary</code> — resumen de lo trabajado
+  • <code>/cost</code> — tokens y costos de sesión
+
+🤖 <b>Modelo</b>
+  • <code>/model</code> — ver modelo activo
+  • <code>/models</code> — cambiar modelo/proveedor
+
+💻 <b>Git</b>
+  • <code>/diff [path]</code> — ver cambios (default: /app)
+  • <code>/commit mensaje</code> — commit rápido
+
+  • <code>/help</code> — esta lista`;
+
+  await bot.sendMessage(msg.chat.id, helpText, { parse_mode: 'HTML' });
+});
+
 // --- Message Handler ---
 bot.on('message', async (msg) => {
   if (!isAllowed(msg)) {
@@ -1180,6 +1825,8 @@ async function handleTextMessage(chatId, text, timestamp) {
   const ttsBoosted = path.join(TMP_DIR, `tts_boost_${timestamp}.ogg`);
 
   try {
+    processingStartTime = Date.now();
+    currentProcessingText = text.substring(0, 100);
     await status.advance(); // → Pensando
     const rawResponse = await callMaximus(text);
 
@@ -1209,6 +1856,8 @@ async function handleTextMessage(chatId, text, timestamp) {
     console.error(`[Error]`, err.message);
     bot.sendMessage(chatId, 'Mae, tuve un problema procesando tu mensaje. Intentá de nuevo en un momento.');
   } finally {
+    processingStartTime = null;
+    currentProcessingText = null;
     cleanup(ttsRaw, ttsBoosted);
   }
 }
