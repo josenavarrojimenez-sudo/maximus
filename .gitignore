@@ -3,3 +3,5 @@ node_modules/
 bot.log
 tmp/
 *.db
+docker-buildx-plugin
+docker-compose-plugin
