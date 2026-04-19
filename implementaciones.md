@@ -236,7 +236,7 @@ Maximus tenía restricciones artificiales — no podía manejar Docker, crear ag
 ## 2026-04-19 - Cambio de Voice ID
 
 ### Cambio
-- Voice ID cambiado de `WEXRePkZGpmcFLvCOaB1` a `wo6udizrrtpIxWGp2qJk`
+- Voice ID cambiado de `WEXRePkZGpmcFLvCOaB1` a `wo6udizrrtpIxWGp2qJk`, luego a `8mBRP99B2Ng2QwsJMFQl`
 
 ### Archivos modificados
 - `bot.js` — VOICE_ID actualizado
