@@ -233,6 +233,21 @@ Maximus tenía restricciones artificiales — no podía manejar Docker, crear ag
 
 ---
 
+## 2026-04-19 - Carpeta de plugins compartida entre todos los agentes
+
+### Problema
+Cuando un agente instalaba un plugin, los demás no lo tenían. Cada container tenía su propia carpeta de plugins aislada.
+
+### Solución
+Montar `/root/.openclaude/plugins` del host en `/app/.openclaude/plugins` de todos los containers. Cuando cualquier agente instale un plugin con `openclaude plugin install`, todos los demás lo ven automáticamente.
+
+### Archivos modificados
+- `docker-compose.yml` (Maximus) — volume mount de plugins
+- `docker-compose.yml` (Optimus) — volume mount de plugins
+- `docker-compose.yml` (Template) — volume mount de plugins + todos los mounts igualados (Docker socket, memoria compartida, host-agents, sesiones)
+
+---
+
 ## 2026-04-19 - Soporte de imágenes para Optimus y template
 
 ### Problema

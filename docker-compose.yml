@@ -15,6 +15,7 @@ services:
       - /root/maximus-sessions:/app/.claude
       - /var/run/docker.sock:/var/run/docker.sock
       - /root/agents:/host-agents
+      - /root/.openclaude/plugins:/app/.openclaude/plugins
     tmpfs:
       - /app/tmp:uid=999,gid=999
     networks:
