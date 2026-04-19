@@ -386,6 +386,43 @@ async function transcribeAudio(filePath) {
   });
 }
 
+// --- Clean text for TTS: remove markdown, emojis, tags that cause artifacts ---
+// NOTE: Only needed when voice ID is NOT fine-tuned for eleven_v3.
+// If using eleven_v3 with a compatible voice, emotion tags [laughs] etc. work fine.
+function cleanTextForTTS(text) {
+  let clean = text;
+  // Remove emotion tags like [laughs], [excited], [whispers], etc.
+  clean = clean.replace(/\[(?:laughs?|sighs?|excited|whispers?|cries?|sad|happy|angry)\]/gi, '');
+  // Remove markdown headers
+  clean = clean.replace(/^#{1,6}\s+/gm, '');
+  // Remove bold/italic markers
+  clean = clean.replace(/\*{1,3}([^*]+)\*{1,3}/g, '$1');
+  clean = clean.replace(/_{1,3}([^_]+)_{1,3}/g, '$1');
+  // Remove strikethrough
+  clean = clean.replace(/~~([^~]+)~~/g, '$1');
+  // Remove inline code
+  clean = clean.replace(/`([^`]+)`/g, '$1');
+  // Remove code blocks
+  clean = clean.replace(/```[\s\S]*?```/g, '');
+  // Remove URLs
+  clean = clean.replace(/https?:\/\/\S+/g, '');
+  // Remove markdown links, keep text
+  clean = clean.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+  // Remove bullet points
+  clean = clean.replace(/^[\s]*[-*•]\s+/gm, '');
+  // Remove numbered lists markers
+  clean = clean.replace(/^[\s]*\d+\.\s+/gm, '');
+  // Remove emojis
+  clean = clean.replace(/[\u{1F300}-\u{1F9FF}\u{2600}-\u{27BF}\u{2700}-\u{27BF}\u{FE00}-\u{FE0F}\u{1F000}-\u{1FFFF}\u{2702}-\u{27B0}\u{200D}\u{20E3}\u{FE0F}\u{E0020}-\u{E007F}]/gu, '');
+  // Remove HTML tags
+  clean = clean.replace(/<[^>]+>/g, '');
+  // Clean up multiple spaces and newlines
+  clean = clean.replace(/\n{3,}/g, '\n\n');
+  clean = clean.replace(/  +/g, ' ');
+  clean = clean.trim();
+  return clean;
+}
+
 // --- Split text into chunks for TTS (max ~800 chars, split at sentence boundaries) ---
 function splitTextForTTS(text, maxLen = 800) {
   if (text.length <= maxLen) return [text];
@@ -881,7 +918,10 @@ bot.on('message', async (msg) => {
         const responseText = rawResponse.replace(/^\[(AUDIO|TEXTO)\]\s*/i, '').trim();
 
         // Responder con audio cuando el usuario manda audio
-        await textToSpeech(responseText, ttsRaw);
+        // NOTE: cleanTextForTTS removes markdown/emojis/emotion tags. If your voice is fine-tuned
+        // for eleven_v3 and you want [laughs] etc, use responseText directly instead.
+        const ttsText = cleanTextForTTS(responseText);
+        await textToSpeech(ttsText, ttsRaw);
         await boostVolume(ttsRaw, ttsBoosted);
         await bot.sendVoice(chatId, ttsBoosted);
         console.log(`[${AGENT_NAME}] Voice note enviada`);

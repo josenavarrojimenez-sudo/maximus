@@ -78,6 +78,35 @@ cp -r /root/agents/template/memory /root/agents/carlos/memory
 # Editar /root/agents/carlos/memory/soul.md con la identidad de Carlos
 ```
 
+#### Configuración de voz (ElevenLabs TTS)
+
+Al elegir una voz en ElevenLabs, verificar qué modelos tiene fine-tuned:
+```bash
+curl -s "https://api.elevenlabs.io/v1/voices/VOICE_ID" -H "xi-api-key: API_KEY" | python3 -c "
+import sys, json
+v = json.load(sys.stdin)
+print(f'Voice: {v[\"name\"]}')
+for m in v.get('fine_tuning',{}).get('fine_tuning_requested',{}).items():
+    print(f'  {m[0]}: {m[1]}')
+"
+```
+
+**Si la voz soporta `eleven_v3`** (fine-tuned):
+- Usar `TTS_MODEL = 'eleven_v3'` en bot.js
+- El CLAUDE.md puede incluir tags emocionales: `[laughs]`, `[whispers]`, `[excited]`, etc.
+- El bot.js NO necesita `cleanTextForTTS()` — comentar esa línea y pasar `responseText` directo
+- Configuración de Maximus como referencia: stability 0.30, similarity 0.75, style 0.70
+
+**Si la voz NO soporta `eleven_v3`** (usar `eleven_multilingual_v2` o el mejor modelo fine-tuned disponible):
+- NUNCA usar tags emocionales en el CLAUDE.md — el TTS los pronuncia como palabras
+- El bot.js DEBE usar `cleanTextForTTS(responseText)` antes de pasar al TTS (ya incluido en template)
+- Recomendación de ElevenLabs para evitar "palabras raras":
+  - stability: 0.40-0.45
+  - similarity_boost: 0.75-0.80
+  - style: 0.30-0.40
+  - speaker_boost: true
+- En el CLAUDE.md, instruir al agente a usar expresividad via puntuación (¡!, ¿?, ...) y escritura conversacional, NO tags
+
 #### CLAUDE.md
 Crear con la personalidad y rol específico del agente. SIEMPRE incluir:
 
