@@ -6,9 +6,14 @@ services:
     env_file:
       - .env
     user: "999:999"
+    group_add:
+      - "989"
     volumes:
       - /root/.openclaude/.credentials.json:/app/.openclaude/.credentials.json
+      - /root/.openclaude/projects/-root/memory:/app/.openclaude/projects/-app/memory:ro
       - /root/maximus-data:/app/data
       - /root/maximus-sessions:/app/.claude
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /root/agents:/host-agents
     tmpfs:
       - /app/tmp:uid=999,gid=999

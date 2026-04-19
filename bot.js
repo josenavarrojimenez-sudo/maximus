@@ -13,15 +13,157 @@ const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const TMP_DIR = path.join(__dirname, 'tmp');
 
 // ElevenLabs config
-const VOICE_ID = '7MbkkemMzdIlG5LyIhul';
+const VOICE_ID = 'WEXRePkZGpmcFLvCOaB1';
 const TTS_MODEL = 'eleven_v3';
 const OUTPUT_FORMAT = 'opus_48000_128';
 const VOICE_SETTINGS = {
-  stability: 0.4,
+  stability: 0.5,
   similarity_boost: 0.75,
   style: 0.5,
   use_speaker_boost: true
 };
+
+// --- Provider/Model Configuration ---
+const PROVIDERS = {
+  anthropic: {
+    label: 'Anthropic',
+    models: [
+      { id: 'sonnet', label: 'Sonnet 4.6' },
+      { id: 'opus', label: 'Opus 4.6' },
+      { id: 'haiku', label: 'Haiku 4.5' }
+    ],
+    env: {}
+  },
+  ollama: {
+    label: 'Ollama Cloud',
+    models: [
+      // Top tier
+      { id: 'deepseek-v3.2:cloud', label: 'DeepSeek V3.2' },
+      { id: 'glm-5.1:cloud', label: 'GLM 5.1' },
+      { id: 'glm-5:cloud', label: 'GLM 5' },
+      { id: 'kimi-k2.5:cloud', label: 'Kimi K2.5' },
+      { id: 'kimi-k2:1t-cloud', label: 'Kimi K2 1T' },
+      { id: 'kimi-k2-thinking:cloud', label: 'Kimi K2 Thinking' },
+      // Qwen family
+      { id: 'qwen3.5:cloud', label: 'Qwen 3.5' },
+      { id: 'qwen3.5:397b-cloud', label: 'Qwen 3.5 397B' },
+      { id: 'qwen3-coder-next:cloud', label: 'Qwen3 Coder Next' },
+      { id: 'qwen3-coder:480b-cloud', label: 'Qwen3 Coder 480B' },
+      { id: 'qwen3-next:80b-cloud', label: 'Qwen3 Next 80B' },
+      { id: 'qwen3-vl:235b-cloud', label: 'Qwen3 VL 235B' },
+      { id: 'qwen3-vl:235b-instruct-cloud', label: 'Qwen3 VL 235B Instruct' },
+      // Google / Gemini
+      { id: 'gemma4:31b-cloud', label: 'Gemma 4 31B' },
+      { id: 'gemini-3-flash-preview:cloud', label: 'Gemini 3 Flash' },
+      // Mistral / Devstral
+      { id: 'mistral-large-3:675b-cloud', label: 'Mistral Large 3 675B' },
+      { id: 'devstral-small-2:24b-cloud', label: 'Devstral Small 2 24B' },
+      { id: 'ministral-3:14b-cloud', label: 'Ministral 3 14B' },
+      { id: 'ministral-3:8b-cloud', label: 'Ministral 3 8B' },
+      { id: 'ministral-3:3b-cloud', label: 'Ministral 3 3B' },
+      // MiniMax
+      { id: 'minimax-m2.7:cloud', label: 'MiniMax M2.7' },
+      { id: 'minimax-m2.5:cloud', label: 'MiniMax M2.5' },
+      { id: 'minimax-m2.1:cloud', label: 'MiniMax M2.1' },
+      { id: 'minimax-m2:cloud', label: 'MiniMax M2' },
+      // NVIDIA
+      { id: 'nemotron-3-super:cloud', label: 'Nemotron 3 Super 120B' },
+      { id: 'nemotron-3-nano:30b-cloud', label: 'Nemotron 3 Nano 30B' },
+      // Others
+      { id: 'gpt-oss:120b-cloud', label: 'GPT-OSS 120B' },
+      { id: 'gpt-oss:20b-cloud', label: 'GPT-OSS 20B' },
+      { id: 'deepseek-v3.1:671b-cloud', label: 'DeepSeek V3.1 671B' },
+      { id: 'glm-4.7:cloud', label: 'GLM 4.7' },
+      { id: 'glm-4.6:cloud', label: 'GLM 4.6' },
+      { id: 'cogito-2.1:cloud', label: 'Cogito 2.1' }
+    ],
+    env: {
+      CLAUDE_CODE_USE_OPENAI: '1',
+      OPENAI_BASE_URL: 'https://ollama.com/v1',
+      OPENAI_API_KEY: process.env.OLLAMA_API_KEY || ''
+    }
+  },
+  openrouter: {
+    label: 'OpenRouter',
+    models: [
+      // OpenAI
+      { id: 'openai/gpt-5.4-pro', label: 'GPT-5.4 Pro' },
+      { id: 'openai/gpt-5.4', label: 'GPT-5.4' },
+      { id: 'openai/gpt-5.4-mini', label: 'GPT-5.4 Mini' },
+      { id: 'openai/gpt-5.2-pro', label: 'GPT-5.2 Pro' },
+      { id: 'openai/gpt-5.2', label: 'GPT-5.2' },
+      { id: 'openai/gpt-5.1', label: 'GPT-5.1' },
+      { id: 'openai/gpt-5', label: 'GPT-5' },
+      { id: 'openai/gpt-5-mini', label: 'GPT-5 Mini' },
+      { id: 'openai/gpt-5-codex', label: 'GPT-5 Codex' },
+      { id: 'openai/gpt-4.1', label: 'GPT-4.1' },
+      { id: 'openai/gpt-4.1-mini', label: 'GPT-4.1 Mini' },
+      { id: 'openai/o4-mini-high', label: 'o4 Mini High' },
+      { id: 'openai/o3', label: 'o3' },
+      { id: 'openai/o3-pro', label: 'o3 Pro' },
+      // xAI / Grok
+      { id: 'x-ai/grok-4.20', label: 'Grok 4.20' },
+      { id: 'x-ai/grok-4', label: 'Grok 4' },
+      { id: 'x-ai/grok-4-fast', label: 'Grok 4 Fast' },
+      { id: 'x-ai/grok-3', label: 'Grok 3' },
+      { id: 'x-ai/grok-3-mini', label: 'Grok 3 Mini' },
+      { id: 'x-ai/grok-code-fast-1', label: 'Grok Code Fast' },
+      // Google Gemini
+      { id: 'google/gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro' },
+      { id: 'google/gemini-3-flash-preview', label: 'Gemini 3 Flash' },
+      { id: 'google/gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
+      { id: 'google/gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
+      // DeepSeek
+      { id: 'deepseek/deepseek-v3.2', label: 'DeepSeek V3.2' },
+      { id: 'deepseek/deepseek-r1', label: 'DeepSeek R1' },
+      { id: 'deepseek/deepseek-v3.1', label: 'DeepSeek V3.1' },
+      // Meta Llama
+      { id: 'meta-llama/llama-4-maverick', label: 'Llama 4 Maverick' },
+      { id: 'meta-llama/llama-4-scout', label: 'Llama 4 Scout' },
+      // Mistral
+      { id: 'mistralai/mistral-large-2512', label: 'Mistral Large 3' },
+      { id: 'mistralai/codestral-2508', label: 'Codestral' },
+      { id: 'mistralai/devstral-2512', label: 'Devstral 2' },
+      // NVIDIA
+      { id: 'nvidia/nemotron-3-super-120b-a12b', label: 'Nemotron 3 Super' },
+      // Cohere
+      { id: 'cohere/command-a', label: 'Command A' },
+      // PinchBench Top Success Rate
+      { id: 'arcee-ai/trinity-large-thinking', label: '🏆 Arcee Trinity Think' },
+      { id: 'xiaomi/mimo-v2-flash', label: '🏆 MiMo V2 Flash' },
+      // PinchBench Top Cost
+      { id: 'google/gemini-2.5-flash-lite', label: '💰 Gemini 2.5 Flash Lite' },
+      { id: 'inception/mercury-2', label: '💰 Mercury 2' },
+      { id: 'openai/gpt-oss-120b', label: '💰 GPT-OSS 120B' },
+      { id: 'openai/gpt-oss-20b', label: '💰 GPT-OSS 20B' },
+      { id: 'z-ai/glm-4.5-air', label: '💰 GLM 4.5 Air' },
+      // PinchBench Top Speed
+      { id: 'openai/gpt-4o', label: '⚡ GPT-4o' },
+      { id: 'meta-llama/llama-3.1-70b-instruct', label: '⚡ Llama 3.1 70B' },
+      // PinchBench Top Value
+      { id: 'qwen/qwen3.5-27b', label: '🎯 Qwen 3.5 27B' },
+      { id: 'qwen/qwen3.5-397b-a17b', label: '🎯 Qwen 3.5 397B' },
+      { id: 'qwen/qwen3.5-9b', label: '🎯 Qwen 3.5 9B' },
+      { id: 'qwen/qwen3.5-35b-a3b', label: '🎯 Qwen 3.5 35B' },
+      { id: 'qwen/qwen-2.5-7b-instruct', label: '🎯 Qwen 2.5 7B' },
+      { id: 'minimax/minimax-m2.7', label: '🎯 MiniMax M2.7' },
+      { id: 'minimax/minimax-m2.1', label: '🎯 MiniMax M2.1' },
+      { id: 'minimax/minimax-m2.5', label: '🎯 MiniMax M2.5' },
+      // Anthropic via OpenRouter
+      { id: 'anthropic/claude-opus-4.7', label: 'Claude Opus 4.7' },
+      { id: 'anthropic/claude-sonnet-4.6', label: 'Claude Sonnet 4.6' },
+      { id: 'anthropic/claude-haiku-4.5', label: 'Claude Haiku 4.5' }
+    ],
+    env: {
+      CLAUDE_CODE_USE_OPENAI: '1',
+      OPENAI_BASE_URL: 'https://openrouter.ai/api/v1',
+      OPENAI_API_KEY: process.env.OPENROUTER_API_KEY || ''
+    }
+  }
+};
+
+let currentProvider = 'anthropic';
+let currentModel = process.env.OPENCLAUDE_MODEL || 'sonnet';
 
 // --- OpenClaude CLI Subprocess (persistent stream-json mode) ---
 let openclaudeProcess = null;
@@ -30,11 +172,14 @@ let pendingReject = null;
 let pendingTimeout = null;
 let responseBuffer = '';
 let assistantText = '';
+let intentionalKill = false;
 const OPENCLAUDE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes per request
 
 function spawnOpenClaude() {
-  const model = process.env.OPENCLAUDE_MODEL || 'sonnet';
-  console.log(`[OpenClaude] Spawning persistent process (model: ${model})...`);
+  const provider = PROVIDERS[currentProvider];
+  console.log(`[OpenClaude] Spawning: ${provider.label} / ${currentModel}`);
+
+  const spawnEnv = { ...process.env, HOME: '/app', ...provider.env };
 
   const proc = spawn('openclaude', [
     '-p',
@@ -42,11 +187,11 @@ function spawnOpenClaude() {
     '--input-format', 'stream-json',
     '--output-format', 'stream-json',
     '--dangerously-skip-permissions',
-    '--model', model
+    '--model', currentModel
   ], {
     cwd: '/app',
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env, HOME: '/app' }
+    env: spawnEnv
   });
 
   proc.stdout.on('data', (chunk) => {
@@ -71,7 +216,7 @@ function spawnOpenClaude() {
   });
 
   proc.on('exit', (code, signal) => {
-    console.error(`[OpenClaude] Process exited (code=${code}, signal=${signal})`);
+    console.log(`[OpenClaude] Process exited (code=${code}, signal=${signal})`);
     openclaudeProcess = null;
     if (pendingReject) {
       pendingReject(new Error(`OpenClaude process died (code=${code})`));
@@ -79,11 +224,13 @@ function spawnOpenClaude() {
       pendingReject = null;
       if (pendingTimeout) { clearTimeout(pendingTimeout); pendingTimeout = null; }
     }
-    // Auto-respawn after 3 seconds
+    // Respawn (immediate if intentional switch, 3s delay if crash)
+    const delay = intentionalKill ? 500 : 3000;
+    intentionalKill = false;
     setTimeout(() => {
       console.log('[OpenClaude] Respawning...');
       spawnOpenClaude();
-    }, 3000);
+    }, delay);
   });
 
   proc.on('error', (err) => {
@@ -115,6 +262,14 @@ function handleOpenClaudeMessage(msg) {
       pendingReject = null;
       if (msg.is_error) {
         console.error(`[OpenClaude] Turn error: ${text.substring(0, 200)}`);
+        // Auth error → kill and respawn, reject so caller can retry
+        if (text.includes('Not logged in') || text.includes('Please run /login')) {
+          console.error('[OpenClaude] Auth error detected — killing process for respawn');
+          intentionalKill = true;
+          if (openclaudeProcess) openclaudeProcess.kill('SIGTERM');
+          resolve('[ERROR:AUTH] Maximus se está reiniciando, intentá de nuevo en unos segundos.');
+          return;
+        }
       }
       console.log(`[OpenClaude] Response received (${text.length} chars)`);
       resolve(text);
@@ -130,7 +285,7 @@ async function callMaximus(userMessage, imageBase64 = null, imageMimeType = null
     throw new Error('OpenClaude is already processing a message');
   }
 
-  // Inject memory context as prefix
+  // Inject memory context + current model info as prefix
   let contextPrefix = '';
   try {
     const ctx = memory.buildContext();
@@ -138,6 +293,10 @@ async function callMaximus(userMessage, imageBase64 = null, imageMimeType = null
   } catch (e) {
     console.error('[Memory] buildContext error:', e.message);
   }
+  const provLabel = PROVIDERS[currentProvider]?.label || currentProvider;
+  const mdlInfo = PROVIDERS[currentProvider]?.models.find(m => m.id === currentModel);
+  const mdlLabel = mdlInfo ? mdlInfo.label : currentModel;
+  contextPrefix += `[Modelo actual: ${provLabel} / ${mdlLabel} (${currentModel})]\n\n`;
 
   // Build content
   let content;
@@ -387,8 +546,199 @@ async function callOpenClaude(userMessage) {
   return callMaximus(userMessage);
 }
 
+// Switch model: kill current process, respawn with new provider/model
+function switchModel(providerId, modelId) {
+  currentProvider = providerId;
+  currentModel = modelId;
+  intentionalKill = true;
+  if (openclaudeProcess) {
+    openclaudeProcess.kill('SIGTERM');
+  } else {
+    spawnOpenClaude();
+  }
+}
+
 // Spawn OpenClaude on startup
 spawnOpenClaude();
+
+// --- Model page builder (4 rows of 2, with next/prev) ---
+const MODELS_PER_PAGE = 8; // 4 rows × 2 columns
+
+async function showModelPage(chatId, messageId, providerId, page) {
+  const provider = PROVIDERS[providerId];
+  if (!provider) return;
+
+  const models = provider.models;
+  const totalPages = Math.ceil(models.length / MODELS_PER_PAGE);
+  const start = page * MODELS_PER_PAGE;
+  const pageModels = models.slice(start, start + MODELS_PER_PAGE);
+
+  // Build rows of 2
+  const buttons = [];
+  for (let i = 0; i < pageModels.length; i += 2) {
+    const row = [];
+    row.push({
+      text: `${pageModels[i].id === currentModel && providerId === currentProvider ? '✅ ' : ''}${pageModels[i].label}`,
+      callback_data: `mdl:${providerId}:${pageModels[i].id}`
+    });
+    if (pageModels[i + 1]) {
+      row.push({
+        text: `${pageModels[i + 1].id === currentModel && providerId === currentProvider ? '✅ ' : ''}${pageModels[i + 1].label}`,
+        callback_data: `mdl:${providerId}:${pageModels[i + 1].id}`
+      });
+    }
+    buttons.push(row);
+  }
+
+  // Navigation row
+  const navRow = [];
+  if (page > 0) navRow.push({ text: '⬅️ Anterior', callback_data: `page:${providerId}:${page - 1}` });
+  navRow.push({ text: `${page + 1}/${totalPages}`, callback_data: 'noop' });
+  if (page < totalPages - 1) navRow.push({ text: 'Siguiente ➡️', callback_data: `page:${providerId}:${page + 1}` });
+  buttons.push(navRow);
+
+  // Back button
+  buttons.push([{ text: '⬅️ Volver a proveedores', callback_data: 'back' }]);
+
+  const text = `📦 *${provider.label}* — Página ${page + 1}/${totalPages}\n\nEscogé un modelo:`;
+  const opts = { parse_mode: 'Markdown', reply_markup: { inline_keyboard: buttons } };
+
+  if (messageId) {
+    await bot.editMessageText(text, { chat_id: chatId, message_id: messageId, ...opts });
+  } else {
+    await bot.sendMessage(chatId, text, opts);
+  }
+}
+
+// --- /model command (show current model) ---
+bot.onText(/\/model$/, async (msg) => {
+  if (!isAllowed(msg)) return;
+  const provider = PROVIDERS[currentProvider];
+  const modelInfo = provider.models.find(m => m.id === currentModel);
+  const modelLabel = modelInfo ? modelInfo.label : currentModel;
+  await bot.sendMessage(msg.chat.id,
+    `🤖 *Modelo activo:* ${provider.label} / ${modelLabel}\n\`${currentModel}\``, {
+    parse_mode: 'Markdown'
+  });
+});
+
+// --- /models command (inline keyboard) ---
+bot.onText(/\/models/, async (msg) => {
+  if (!isAllowed(msg)) return;
+  const chatId = msg.chat.id;
+
+  const provider = PROVIDERS[currentProvider];
+  const modelInfo = provider.models.find(m => m.id === currentModel);
+  const modelLabel = modelInfo ? modelInfo.label : currentModel;
+
+  const buttons = Object.entries(PROVIDERS).map(([id, p]) => ({
+    text: `${id === currentProvider ? '✅ ' : ''}${p.label}`,
+    callback_data: `prov:${id}`
+  }));
+
+  await bot.sendMessage(chatId,
+    `🤖 *Modelo actual:* ${provider.label} / ${modelLabel}\n\nEscogé un proveedor:`, {
+    parse_mode: 'Markdown',
+    reply_markup: { inline_keyboard: [buttons] }
+  });
+});
+
+// --- Handle inline keyboard button presses ---
+bot.on('callback_query', async (query) => {
+  if (!isAllowed({ from: query.from })) {
+    await bot.answerCallbackQuery(query.id, { text: 'No autorizado' });
+    return;
+  }
+
+  const chatId = query.message.chat.id;
+  const messageId = query.message.message_id;
+  const data = query.data;
+
+  await bot.answerCallbackQuery(query.id);
+
+  // No-op (page counter button)
+  if (data === 'noop') return;
+
+  // Provider selected → show its models (paginated)
+  if (data.startsWith('prov:')) {
+    const providerId = data.split(':')[1];
+    const page = 0;
+    await showModelPage(chatId, messageId, providerId, page);
+    return;
+  }
+
+  // Pagination: next/prev page
+  if (data.startsWith('page:')) {
+    const [, providerId, pageStr] = data.split(':');
+    await showModelPage(chatId, messageId, providerId, parseInt(pageStr));
+    return;
+  }
+
+  // Model selected → switch
+  if (data.startsWith('mdl:')) {
+    const parts = data.split(':');
+    const providerId = parts[1];
+    const modelId = parts.slice(2).join(':'); // model IDs can have colons (e.g. qwen3.5)
+    const provider = PROVIDERS[providerId];
+    if (!provider) return;
+
+    const modelInfo = provider.models.find(m => m.id === modelId);
+
+    // Already on this model? Just confirm
+    if (providerId === currentProvider && modelId === currentModel) {
+      await bot.editMessageText(
+        `✅ Ya estás en *${provider.label}* / *${modelInfo?.label || modelId}*`, {
+        chat_id: chatId,
+        message_id: messageId,
+        parse_mode: 'Markdown'
+      });
+      return;
+    }
+
+    switchModel(providerId, modelId);
+
+    await bot.editMessageText(
+      `🔄 Cambiando a *${provider.label}* / *${modelInfo?.label || modelId}*...`, {
+      chat_id: chatId,
+      message_id: messageId,
+      parse_mode: 'Markdown'
+    });
+
+    // Wait for respawn and confirm
+    setTimeout(async () => {
+      try {
+        await bot.editMessageText(
+          `✅ Listo — ahora usando *${provider.label}* / *${modelInfo?.label || modelId}*`, {
+          chat_id: chatId,
+          message_id: messageId,
+          parse_mode: 'Markdown'
+        });
+      } catch (e) { /* message already deleted */ }
+    }, 3000);
+    return;
+  }
+
+  // Back to provider list
+  if (data === 'back') {
+    const provider = PROVIDERS[currentProvider];
+    const modelInfo = provider.models.find(m => m.id === currentModel);
+    const modelLabel = modelInfo ? modelInfo.label : currentModel;
+
+    const buttons = Object.entries(PROVIDERS).map(([id, p]) => ({
+      text: `${id === currentProvider ? '✅ ' : ''}${p.label}`,
+      callback_data: `prov:${id}`
+    }));
+
+    await bot.editMessageText(
+      `🤖 *Modelo actual:* ${provider.label} / ${modelLabel}\n\nEscogé un proveedor:`, {
+      chat_id: chatId,
+      message_id: messageId,
+      parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: [buttons] }
+    });
+    return;
+  }
+});
 
 // --- ElevenLabs STT (Speech-to-Text) ---
 async function transcribeAudio(filePath) {
@@ -554,20 +904,108 @@ function cleanup(...files) {
   }
 }
 
-// --- Send text response (handles chunking and markdown fallback) ---
+// --- Convert markdown to Telegram HTML ---
+function mdToHtml(text) {
+  let html = text;
+
+  // Headers → bold with emoji
+  html = html.replace(/^### (.+)$/gm, '\n🔹 <b>$1</b>');
+  html = html.replace(/^## (.+)$/gm, '\n📌 <b>$1</b>');
+  html = html.replace(/^# (.+)$/gm, '\n📋 <b>$1</b>');
+
+  // Bold & italic (process before single)
+  html = html.replace(/\*\*\*(.+?)\*\*\*/g, '<b><i>$1</i></b>');
+  html = html.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+  html = html.replace(/(?<!\w)\*(.+?)\*(?!\w)/g, '<i>$1</i>');
+  html = html.replace(/__(.+?)__/g, '<b>$1</b>');
+  html = html.replace(/(?<!\w)_(.+?)_(?!\w)/g, '<i>$1</i>');
+
+  // Strikethrough
+  html = html.replace(/~~(.+?)~~/g, '<s>$1</s>');
+
+  // Inline code (but not triple backticks)
+  html = html.replace(/(?<!`)`([^`\n]+?)`(?!`)/g, '<code>$1</code>');
+
+  // Bullet points with emoji
+  html = html.replace(/^[\s]*[-*] /gm, '  • ');
+
+  // Numbered lists with emoji
+  html = html.replace(/^(\d+)\. /gm, '  $1️⃣ ');
+
+  // Blockquotes
+  html = html.replace(/^> (.+)$/gm, '┃ <i>$1</i>');
+
+  // Links
+  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
+
+  // Clean up excessive newlines
+  html = html.replace(/\n{3,}/g, '\n\n');
+
+  return html.trim();
+}
+
+// --- Extract code blocks from text ---
+function extractCodeBlocks(text) {
+  const codeBlocks = [];
+  let index = 0;
+  const cleaned = text.replace(/```(\w*)\n?([\s\S]*?)```/g, (match, lang, code) => {
+    codeBlocks.push({ lang: lang || 'code', code: code.trim() });
+    index++;
+    return `\n💻 <i>Ver código ${lang || ''} abajo ⬇️</i>\n`;
+  });
+  return { text: cleaned, codeBlocks };
+}
+
+// --- Send text response (HTML formatted with separate code blocks) ---
 async function sendTextResponse(chatId, responseText) {
-  if (responseText.length > 4096) {
-    const chunks = responseText.match(/[\s\S]{1,4096}/g);
-    for (const chunk of chunks) {
-      await bot.sendMessage(chatId, chunk, { parse_mode: 'Markdown' }).catch(() => {
-        bot.sendMessage(chatId, chunk);
+  // Extract code blocks first
+  const { text: mainText, codeBlocks } = extractCodeBlocks(responseText);
+
+  // Convert markdown to HTML
+  const htmlText = mdToHtml(mainText);
+
+  // Send main message
+  const sendHtml = async (chatId, content) => {
+    if (content.length > 4096) {
+      // Split on double newlines to keep structure
+      const parts = [];
+      let current = '';
+      for (const line of content.split('\n')) {
+        if ((current + '\n' + line).length > 4000 && current) {
+          parts.push(current);
+          current = line;
+        } else {
+          current = current ? current + '\n' + line : line;
+        }
+      }
+      if (current) parts.push(current);
+
+      for (const part of parts) {
+        await bot.sendMessage(chatId, part, { parse_mode: 'HTML' }).catch(() => {
+          bot.sendMessage(chatId, part);
+        });
+      }
+    } else {
+      await bot.sendMessage(chatId, content, { parse_mode: 'HTML' }).catch(() => {
+        bot.sendMessage(chatId, content);
       });
     }
-  } else {
-    await bot.sendMessage(chatId, responseText, { parse_mode: 'Markdown' }).catch(() => {
-      bot.sendMessage(chatId, responseText);
+  };
+
+  await sendHtml(chatId, htmlText);
+
+  // Send each code block as a separate copyable message
+  for (const block of codeBlocks) {
+    const codeMsg = `📋 <b>${block.lang.toUpperCase()}</b>\n\n<pre><code class="language-${block.lang}">${escapeHtml(block.code)}</code></pre>`;
+    await bot.sendMessage(chatId, codeMsg, { parse_mode: 'HTML' }).catch(() => {
+      bot.sendMessage(chatId, `${block.lang}:\n${block.code}`);
     });
   }
+}
+
+// --- Escape HTML special chars for code blocks ---
+function escapeHtml(text) {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 // --- Message Handler ---
@@ -720,6 +1158,9 @@ bot.on('message', async (msg) => {
     // --- TEXT MESSAGE FLOW (uses batching) ---
     const text = msg.text;
     if (!text) return;
+
+    // Skip commands — handled by onText handlers
+    if (text.startsWith('/')) return;
 
     console.log(`[Jose] ${text}`);
     enqueueBatchedText(msg, chatId);

@@ -128,12 +128,125 @@ Maximus revisó el repo y encontró items no implementados. Estado:
 
 ---
 
+## 2026-04-18 - Sistema multi-proveedor /models + /model
+
+### Problema
+El bot solo podía usar Anthropic (Sonnet) via OAuth. Jose quiere poder cambiar entre múltiples proveedores y modelos desde Telegram.
+
+### Solución
+Sistema de switching dinámico de proveedor/modelo con menú interactivo en Telegram:
+
+**Proveedores configurados:**
+1. **Anthropic** (OAuth nativo) — Sonnet 4.6, Opus 4.6, Haiku 4.5
+2. **Ollama Cloud** (API key, OpenAI-compatible) — 33 modelos cloud (DeepSeek, Qwen, Gemma, Kimi, MiniMax, Nemotron, etc.)
+3. **OpenRouter** (API key, OpenAI-compatible) — 54 modelos curados (GPT-5.x, Grok 4.x, Gemini 3.x, DeepSeek, Llama 4, Mistral, + PinchBench top models)
+
+**Funcionalidad:**
+- `/model` — Muestra el modelo activo (proveedor + nombre + ID técnico)
+- `/models` — Menú interactivo con inline keyboard:
+  - Selección de proveedor (Anthropic / Ollama Cloud / OpenRouter)
+  - Lista paginada de modelos (4 filas × 2 columnas por página, con Next/Previous)
+  - Al seleccionar: kill proceso actual → respawn con nuevo provider/model (500ms)
+  - Indicador ✅ en modelo activo
+  - Iconos PinchBench: 🏆 top success, 💰 top cost, ⚡ top speed, 🎯 top value
+- Inyección de `[Modelo actual: Provider / Model]` en cada mensaje para que el modelo sepa qué es
+- Detección de error "Not logged in" → auto kill + respawn + mensaje amigable
+
+**Mecanismo técnico:**
+- Providers no-Anthropic usan env vars: `CLAUDE_CODE_USE_OPENAI=1`, `OPENAI_BASE_URL`, `OPENAI_API_KEY`
+- `switchModel()` setea `intentionalKill=true`, mata el proceso, el handler de exit respawnea con los nuevos valores
+- Callback data usa prefijos cortos (`prov:`, `mdl:`, `page:`) para respetar límite de 64 bytes de Telegram
+
+### Archivos modificados
+- `bot.js` — PROVIDERS config, spawnOpenClaude() dinámico, switchModel(), /models con paginación, /model, callback_query handler
+- `.env` — Agregado OLLAMA_API_KEY y OPENROUTER_API_KEY
+
+---
+
+## 2026-04-18 - Memoria compartida OpenClaude → Maximus
+
+### Problema
+Maximus no tenía acceso a los archivos de memoria de OpenClaude (soul.md, agents.md, user-jose.md, feedback-jose.md, etc.). Cuando le preguntabas "quién sos" no tenía contexto de su identidad completa.
+
+### Solución
+Montar el directorio de memoria del host dentro del container como read-only:
+```
+/root/.openclaude/projects/-root/memory → /app/.openclaude/projects/-app/memory:ro
+```
+OpenClaude CLI dentro del container lee estos archivos automáticamente como su MEMORY.md nativa.
+
+### Archivos modificados
+- `docker-compose.yml` — Agregado volume mount de memoria
+
+---
+
+## 2026-04-18 - Mensajes HTML interactivos + código separado
+
+### Problema
+Los mensajes de Maximus eran texto plano sin formato, difíciles de leer en Telegram.
+
+### Solución
+- `mdToHtml()` — Convierte Markdown a HTML de Telegram: headers con emojis (📋📌🔹), bold/italic/strikethrough, bullets con •, listas numeradas, blockquotes, links
+- `extractCodeBlocks()` — Extrae bloques de código y los envía como mensajes separados con `<pre><code>` (Telegram muestra botón de copiar automáticamente)
+- Fallback a texto plano si el HTML falla
+
+### Archivos modificados
+- `bot.js` — `sendTextResponse()` reescrito con mdToHtml(), extractCodeBlocks(), escapeHtml()
+
+---
+
+## 2026-04-18 - Servicio de permisos de credenciales OAuth
+
+### Problema
+Al hacer `/login`, el archivo de credenciales se regenera con permisos `600` (solo root). Los containers Docker (user 999) quedan sin acceso → error "Not logged in" en todos los agentes.
+
+### Solución
+Servicio systemd `openclaude-credentials` que vigila el archivo con inotify y automáticamente lo pone en `644` cuando cambia:
+- `/root/.openclaude/fix-credentials-permissions.sh` — Script watcher
+- `/etc/systemd/system/openclaude-credentials.service` — Servicio systemd (enabled, auto-start)
+- Aplica para Maximus y todos los agentes futuros que compartan las credenciales
+
+### Archivos creados
+- `/root/.openclaude/fix-credentials-permissions.sh`
+- `/etc/systemd/system/openclaude-credentials.service`
+
+---
+
+## 2026-04-18 - Maximus con poderes completos (Docker + Host)
+
+### Problema
+Maximus tenía restricciones artificiales — no podía manejar Docker, crear agentes, ni acceder al filesystem del host. Jose quiere que Maximus tenga exactamente las mismas capacidades que OpenClaude CLI.
+
+### Solución
+- **Docker CLI** instalado dentro del container (binario copiado del host)
+- **Docker socket** montado (`/var/run/docker.sock`) con grupo `989` (docker)
+- **Directorio de agentes** montado (`/root/agents → /host-agents`) donde Maximus puede crear nuevos agentes
+- **CLAUDE.md actualizado** — permisos totales, única restricción: no matarse a sí mismo
+- Maximus puede: crear/manejar/eliminar containers, acceder filesystem, instalar paquetes, manejar infraestructura
+- Siempre consulta a Jose antes de acciones importantes
+
+### Archivos modificados
+- `Dockerfile` — Docker CLI instalado, curl agregado
+- `docker-compose.yml` — Docker socket mount, agents dir mount, group_add 989
+- `CLAUDE.md` — Permisos totales documentados
+- `.dockerignore` — docker-cli no excluido
+
+---
+
+## 2026-04-18 - Ajuste de voz
+
+### Cambios
+- `VOICE_SETTINGS.stability` cambiado de 0.4 a 0.5
+- Voice ID cambiado a `WEXRePkZGpmcFLvCOaB1`
+
+---
+
 ## Features existentes (pre-migración)
 
 - **Status Cards** — Mensajes HTML de progreso en Telegram que se auto-eliminan al completar
 - **OAuth auto-refresh** — Credenciales montadas read-write para que OpenClaude refresque tokens
 - **Soporte de imagenes** — Handler para fotos y documentos de imagen
-- **Audio bidireccional** — ElevenLabs TTS/STT con chunking y volume boost (Voice ID: 7MbkkemMzdIlG5LyIhul, modelo eleven_v3)
+- **Audio bidireccional** — ElevenLabs TTS/STT con chunking y volume boost (Voice ID: WEXRePkZGpmcFLvCOaB1, modelo eleven_v3)
 - **Memoria persistente** — SQLite + Markdown (episodica, journal, canon, preferencias)
 - **Auto-memoria** — Bloques [REMEMBER] procesados automaticamente
 - **Cola de mensajes** — Procesamiento secuencial con límite 5, drop stale, batching 2s
