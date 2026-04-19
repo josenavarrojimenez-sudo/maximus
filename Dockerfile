@@ -8,9 +8,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Docker CLI from host
+# Install Docker CLI + compose + buildx from host
 COPY docker-cli /usr/local/bin/docker
-RUN chmod +x /usr/local/bin/docker
+COPY docker-compose-plugin /usr/libexec/docker/cli-plugins/docker-compose
+COPY docker-buildx-plugin /usr/libexec/docker/cli-plugins/docker-buildx
+RUN chmod +x /usr/local/bin/docker /usr/libexec/docker/cli-plugins/*
 
 RUN npm install -g @gitlawb/openclaude
 

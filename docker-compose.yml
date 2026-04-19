@@ -17,3 +17,10 @@ services:
       - /root/agents:/host-agents
     tmpfs:
       - /app/tmp:uid=999,gid=999
+    networks:
+      - agents-net
+
+networks:
+  agents-net:
+    name: agents-net
+    external: true
