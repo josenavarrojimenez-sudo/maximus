@@ -233,6 +233,46 @@ Maximus tenía restricciones artificiales — no podía manejar Docker, crear ag
 
 ---
 
+## 2026-04-19 - Soporte de imágenes para Optimus y template
+
+### Problema
+Optimus y el template de agentes no podían procesar imágenes enviadas por Telegram. Solo Maximus tenía esta capacidad.
+
+### Solución
+Portada la lógica de imágenes de Maximus a Optimus y al template:
+- `downloadTelegramFile()` — descarga el archivo via Telegram Bot API
+- `cleanup()` — limpieza de archivos temporales
+- `callOptimus()`/`callAgent()` — ahora aceptan `imageBase64` y `imageMimeType`
+- `callWithFallback()` — pasa imagen al modelo activo
+- Message handler detecta `msg.photo` y `msg.document` con mime image
+- Imagen se convierte a base64 y se envía como content array via stream-json
+
+### Archivos modificados
+- `bot.js` (Optimus) — https, downloadTelegramFile, cleanup, image flow completo
+- `bot.js` (Template) — mismo cambio
+
+---
+
+## 2026-04-19 - Optimus con mismas capacidades que Maximus
+
+### Problema
+Optimus no tenía Docker, acceso al host, memoria compartida ni sesiones persistentes.
+
+### Solución
+- Docker socket montado + grupo 989
+- Memoria compartida del equipo (read-only)
+- Directorio de agentes montado en /host-agents
+- Sesiones persistentes en /root/optimus-sessions
+- CLAUDE.md actualizado con permisos Docker y restricción de no auto-matarse
+- Grupo docker 989 creado en Dockerfile
+
+### Archivos modificados
+- `docker-compose.yml` (Optimus)
+- `Dockerfile` (Optimus)
+- `CLAUDE.md` (Optimus)
+
+---
+
 ## 2026-04-19 - Cambio de Voice ID
 
 ### Cambio
