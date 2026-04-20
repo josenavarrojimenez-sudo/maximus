@@ -7,6 +7,7 @@ const path = require('path');
 const http = require('http');
 const memory = require('./memory');
 const linear = require('./linear');
+const dreaming = require('./dreaming');
 
 // ─── Mission Control Integration ──────────────────────────────────────────────
 const MC_HOST = process.env.MC_HOST || 'mission-control';
@@ -311,8 +312,89 @@ const PROVIDERS = {
   }
 };
 
-let currentProvider = 'anthropic';
-let currentModel = process.env.OPENCLAUDE_MODEL || 'sonnet';
+let currentProvider = process.env.DEFAULT_PROVIDER || 'anthropic';
+let currentModel = process.env.DEFAULT_MODEL || process.env.OPENCLAUDE_MODEL || 'sonnet';
+
+// --- Image Generation Models (OpenRouter) ---
+const IMAGE_PROVIDERS = {
+  google: {
+    label: 'Google Gemini',
+    models: [
+      { id: 'google/gemini-2.5-flash-image', label: 'Nano Banana', price: '$2.5/M' },
+      { id: 'google/gemini-2.5-flash-image-preview', label: 'Nano Banana Preview', price: '$0.3/M' },
+      { id: 'google/gemini-3.1-flash-image-preview', label: 'Nano Banana 2', price: '$3/M' },
+      { id: 'google/gemini-3-pro-image-preview', label: 'Nano Banana Pro', price: '$12/M' },
+    ]
+  },
+  openai: {
+    label: 'OpenAI',
+    models: [
+      { id: 'openai/gpt-5-image-mini', label: 'GPT-5 Image Mini', price: '$2/M' },
+      { id: 'openai/gpt-5-image', label: 'GPT-5 Image', price: '$10/M' },
+    ]
+  },
+  flux: {
+    label: 'FLUX (Free)',
+    models: [
+      { id: 'black-forest-labs/flux.2-max', label: 'FLUX.2 Max', price: 'Free' },
+      { id: 'black-forest-labs/flux.2-pro', label: 'FLUX.2 Pro', price: 'Free' },
+      { id: 'black-forest-labs/flux.2-flex', label: 'FLUX.2 Flex', price: 'Free' },
+      { id: 'black-forest-labs/flux.2-klein-4b', label: 'FLUX.2 Klein 4B', price: 'Free' },
+    ]
+  },
+  sourceful: {
+    label: 'Sourceful (Free)',
+    models: [
+      { id: 'sourceful/riverflow-v2-pro', label: 'Riverflow V2 Pro', price: 'Free' },
+      { id: 'sourceful/riverflow-v2-fast', label: 'Riverflow V2 Fast', price: 'Free' },
+      { id: 'sourceful/riverflow-v2-max-preview', label: 'Riverflow V2 Max', price: 'Free' },
+      { id: 'sourceful/riverflow-v2-standard-preview', label: 'Riverflow V2 Std', price: 'Free' },
+      { id: 'sourceful/riverflow-v2-fast-preview', label: 'Riverflow V2 Fast Preview', price: 'Free' },
+    ]
+  },
+  other: {
+    label: 'Otros (Free)',
+    models: [
+      { id: 'bytedance-seed/seedream-4.5', label: 'Seedream 4.5', price: 'Free' },
+    ]
+  }
+};
+
+// --- Video Generation Models (OpenRouter) ---
+const VIDEO_PROVIDERS = {
+  google: {
+    label: 'Google Veo',
+    models: [
+      { id: 'google/veo-3.1', label: 'Veo 3.1 (text only)', price: '$0.20-0.40/s' },
+    ]
+  },
+  openai: {
+    label: 'OpenAI Sora',
+    models: [
+      { id: 'openai/sora-2-pro', label: 'Sora 2 Pro (text only)', price: '$0.30-0.50/s' },
+    ]
+  },
+  alibaba: {
+    label: 'Alibaba Wan (img2vid)',
+    models: [
+      { id: 'alibaba/wan-2.7', label: 'Wan 2.7', price: '$0.10/s' },
+      { id: 'alibaba/wan-2.6', label: 'Wan 2.6', price: '$0.10-0.15/s' },
+    ]
+  },
+  bytedance: {
+    label: 'ByteDance (img2vid)',
+    models: [
+      { id: 'bytedance/seedance-2.0', label: 'Seedance 2.0', price: '~$0.007/1K tokens' },
+      { id: 'bytedance/seedance-2.0-fast', label: 'Seedance 2.0 Fast', price: '~$0.006/1K tokens' },
+      { id: 'bytedance/seedance-1-5-pro', label: 'Seedance 1.5 Pro', price: '~$0.002/1K tokens' },
+    ]
+  }
+};
+
+let currentImageProvider = 'google';
+let currentImageModel = 'google/gemini-3.1-flash-image-preview';
+let currentVideoProvider = 'alibaba';
+let currentVideoModel = 'alibaba/wan-2.7';
 
 // --- Proactive session rotation ---
 const SESSION_ROTATE_TURNS = 50;
@@ -409,8 +491,28 @@ let pendingTimeout = null;
 let responseBuffer = '';
 let assistantText = '';
 let intentionalKill = false;
+let activeStatusCard = null; // Shared reference for live action updates in Telegram
 const OPENCLAUDE_HARD_TIMEOUT_MS = 30 * 60 * 1000; // 30 min hard safety net
 const OPENCLAUDE_NOTIFY_INTERVAL_MS = 3 * 60 * 1000; // 3 min notify interval
+
+// Tool name → human-readable label for StatusCard
+const TOOL_LABELS = {
+  Read: (input) => `📄 Leyendo ${path.basename(input.file_path || '')}`,
+  Edit: (input) => `✏️ Editando ${path.basename(input.file_path || '')}`,
+  Write: (input) => `📝 Escribiendo ${path.basename(input.file_path || '')}`,
+  Bash: () => `⚙️ Ejecutando comando`,
+  Grep: () => `🔍 Buscando en código`,
+  Glob: () => `📁 Buscando archivos`,
+  WebSearch: () => `🌐 Buscando en internet`,
+  WebFetch: () => `🌐 Accediendo a URL`,
+  Agent: () => `🤖 Delegando a sub-agente`,
+};
+
+// Last image context — persists across messages so follow-up text can reference the image
+let lastImageBase64 = null;
+let lastImageMimeType = null;
+let lastImageTimestamp = 0;
+const IMAGE_CONTEXT_TTL_MS = 10 * 60 * 1000; // 10 min — image stays available for follow-up messages
 
 function spawnOpenClaude() {
   if (currentProvider === 'codex') return; // codex usa spawn por llamada, no proceso persistente
@@ -459,6 +561,11 @@ function spawnOpenClaude() {
   proc.on('exit', (code, signal) => {
     console.log(`[OpenClaude] Process exited (code=${code}, signal=${signal})`);
     openclaudeProcess = null;
+    // Clean up stuck StatusCard (typing indicator + timers)
+    if (activeStatusCard) {
+      activeStatusCard.fail('Proceso reiniciado').catch(() => {});
+      activeStatusCard = null;
+    }
     if (pendingReject) {
       pendingReject(new Error(`OpenClaude process died (code=${code})`));
       pendingResolve = null;
@@ -533,11 +640,23 @@ function handleOpenClaudeMessage(msg) {
     if (textParts.length > 0) {
       assistantText = textParts.join('');
     }
-    // Track tool_use calls in Mission Control
+    // Track tool_use calls in Mission Control + StatusCard live updates
     const toolCalls = msg.message.content.filter(c => c.type === 'tool_use');
-    if (toolCalls.length > 0 && pendingResolve) {
+    if (toolCalls.length > 0) {
       const toolName = toolCalls[0].name || 'tool';
-      mcUpdateStatus('working', `Ejecutando: ${toolName}`);
+      if (pendingResolve) mcUpdateStatus('working', `Ejecutando: ${toolName}`);
+      // Update StatusCard with tool action
+      if (activeStatusCard) {
+        const labelFn = TOOL_LABELS[toolName];
+        const actionText = labelFn ? labelFn(toolCalls[0].input || {}) : toolName;
+        activeStatusCard.updateAction(actionText);
+      }
+    }
+    // Show assistant "thinking" text on StatusCard
+    const textBlocks = msg.message.content.filter(c => c.type === 'text');
+    if (textBlocks.length > 0 && activeStatusCard && toolCalls.length === 0) {
+      const thought = textBlocks[0].text.trim().substring(0, 60);
+      if (thought) activeStatusCard.updateAction(thought);
     }
   } else if (msg.type === 'result') {
     // Track usage/cost if available
@@ -617,7 +736,32 @@ async function callCodex(userMessage) {
       stdio: ['ignore', 'pipe', 'pipe']
     });
     proc.stdout.on('data', d => { output += d.toString(); });
-    proc.stderr.on('data', d => { output += d.toString(); });
+    proc.stderr.on('data', d => {
+      const text = d.toString();
+      output += text;
+      // Parse Codex stderr for live action updates
+      if (activeStatusCard) {
+        const lines = text.split('\n').filter(l => l.trim());
+        for (const line of lines) {
+          const clean = line.replace(/[\u2800-\u28FF⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/g, '').trim();
+          if (!clean || clean.length < 3) continue;
+          // Map Codex actions to friendly labels
+          if (/read|reading/i.test(clean)) {
+            activeStatusCard.updateAction('📄 Leyendo archivo');
+          } else if (/exec|running|command/i.test(clean)) {
+            activeStatusCard.updateAction('⚙️ Ejecutando comando');
+          } else if (/search|grep/i.test(clean)) {
+            activeStatusCard.updateAction('🔍 Buscando en código');
+          } else if (/writ|edit|patch/i.test(clean)) {
+            activeStatusCard.updateAction('✏️ Editando archivo');
+          } else if (/fetch|http|curl|web/i.test(clean)) {
+            activeStatusCard.updateAction('🌐 Accediendo a URL');
+          } else if (clean.length > 5 && clean.length < 60) {
+            activeStatusCard.updateAction(clean.substring(0, 50));
+          }
+        }
+      }
+    });
     proc.on('close', code => {
       clearTimeout(timeout);
       const lines = output.split('\n').map(l => l.trim()).filter(Boolean);
@@ -637,8 +781,332 @@ async function callCodex(userMessage) {
   });
 }
 
+// --- Image Generation via OpenRouter ---
+async function generateImage(prompt, inputImageBase64 = null, inputImageMimeType = null) {
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) throw new Error('OPENROUTER_API_KEY no configurado');
+
+  // Build message content — text-only or image editing
+  let messageContent;
+  if (inputImageBase64) {
+    // Image editing: send input image + prompt
+    messageContent = [
+      { type: 'text', text: prompt },
+      { type: 'image_url', image_url: { url: `data:${inputImageMimeType || 'image/jpeg'};base64,${inputImageBase64}` } }
+    ];
+    console.log(`[ImageGen] Image editing mode — input image: ${inputImageBase64.length} chars`);
+  } else {
+    messageContent = prompt;
+  }
+
+  // FLUX/diffusion models only output image, multimodal models output image+text
+  const isImageOnly = currentImageModel.includes('flux') || currentImageModel.includes('riverflow') || currentImageModel.includes('seedream') || currentImageModel.includes('klein');
+  const requestBody = {
+    model: currentImageModel,
+    messages: [{ role: 'user', content: messageContent }],
+    modalities: isImageOnly ? ['image'] : ['image', 'text'],
+  };
+  // Gemini/GPT models support image_config
+  if (currentImageModel.startsWith('google/') || currentImageModel.startsWith('openai/')) {
+    requestBody.image_config = { aspect_ratio: '1:1', image_size: '1K' };
+  }
+
+  console.log(`[ImageGen] Request — model: ${currentImageModel}, modalities: ${JSON.stringify(requestBody.modalities)}, hasInputImage: ${!!inputImageBase64}`);
+
+  const response = await axios.post(
+    'https://openrouter.ai/api/v1/chat/completions',
+    requestBody,
+    {
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://maximus.bot',
+        'X-Title': 'Maximus Telegram Bot'
+      },
+      timeout: 120000
+    }
+  );
+
+  const choice = response.data.choices?.[0];
+  const images = choice?.message?.images || [];
+  const textContent = choice?.message?.content || '';
+
+  // Some models embed base64 in content parts instead of images array
+  if (images.length === 0 && Array.isArray(choice?.message?.content)) {
+    for (const part of choice.message.content) {
+      if (part.type === 'image_url' || part.type === 'image') {
+        const url = part.image_url?.url || part.url || '';
+        if (url.startsWith('data:image')) images.push({ image_url: { url } });
+      }
+    }
+  }
+
+  return { images, text: typeof textContent === 'string' ? textContent : '' };
+}
+
+// --- Video Generation via OpenRouter (async polling) ---
+async function generateVideo(prompt, chatId, inputImageBase64 = null, inputImageMimeType = null) {
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) throw new Error('OPENROUTER_API_KEY no configurado');
+
+  const requestBody = {
+    model: currentVideoModel,
+    prompt: prompt,
+    duration: 8,
+    resolution: '1080p',
+    aspect_ratio: '16:9',
+    generate_audio: true
+  };
+
+  // Image-to-video: only some models support frame_images
+  const I2V_MODELS = ['alibaba/wan-2.7', 'alibaba/wan-2.6', 'bytedance/seedance-2.0', 'bytedance/seedance-2.0-fast', 'bytedance/seedance-1-5-pro'];
+  if (inputImageBase64) {
+    if (!I2V_MODELS.includes(requestBody.model)) {
+      const fallback = 'alibaba/wan-2.7';
+      console.log(`[VideoGen] ${requestBody.model} does NOT support image-to-video — switching to ${fallback}`);
+      requestBody.model = fallback;
+    }
+    requestBody.frame_images = [
+      {
+        type: 'image_url',
+        image_url: { url: `data:${inputImageMimeType || 'image/jpeg'};base64,${inputImageBase64}` },
+        frame_type: 'first_frame'
+      }
+    ];
+    console.log(`[VideoGen] Image-to-video mode — input image as first frame via ${requestBody.model}`);
+  }
+
+  console.log(`[VideoGen] Submitting — model: ${currentVideoModel}, hasInputImage: ${!!inputImageBase64}`);
+
+  const submitResponse = await axios.post(
+    'https://openrouter.ai/api/v1/videos',
+    requestBody,
+    {
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      timeout: 30000
+    }
+  );
+
+  const jobId = submitResponse.data.id || submitResponse.data.job_id;
+  const pollingUrl = submitResponse.data.polling_url || `https://openrouter.ai/api/v1/videos/${jobId}`;
+  if (!jobId) throw new Error('No job ID returned from video API');
+  console.log(`[VideoGen] Job submitted: ${jobId}, polling: ${pollingUrl}`);
+
+  // Poll for completion (max 10 min, every 30s)
+  const MAX_POLLS = 20;
+  for (let i = 0; i < MAX_POLLS; i++) {
+    await new Promise(r => setTimeout(r, 30000));
+    if (chatId) safeSendChatAction(chatId, 'upload_video');
+
+    const pollResponse = await axios.get(
+      pollingUrl,
+      { headers: { 'Authorization': `Bearer ${apiKey}` }, timeout: 15000 }
+    );
+
+    const status = pollResponse.data.status;
+    console.log(`[VideoGen] Poll ${i + 1}/${MAX_POLLS}: status=${status}`);
+    if (status === 'completed' || status === 'succeeded') {
+      return pollResponse.data;
+    }
+    if (status === 'failed' || status === 'error') {
+      throw new Error(`Video generation failed: ${pollResponse.data.error || JSON.stringify(pollResponse.data)}`);
+    }
+  }
+  throw new Error('Video generation timed out (10 min)');
+}
+
+// --- Process [GENIMG] and [GENVID] tags from LLM response ---
+async function processMediaTags(responseText, chatId) {
+  let cleanText = responseText;
+
+  // Use stored image context for editing if available
+  const hasStoredImage = lastImageBase64 && (Date.now() - lastImageTimestamp) < IMAGE_CONTEXT_TTL_MS;
+
+  // Image generation
+  const imgMatch = cleanText.match(/\[GENIMG\]([\s\S]*?)\[\/GENIMG\]/);
+  if (imgMatch) {
+    const imgPrompt = imgMatch[1].trim();
+    cleanText = cleanText.replace(/\[GENIMG\][\s\S]*?\[\/GENIMG\]/, '').trim();
+    try {
+      safeSendChatAction(chatId, 'upload_photo');
+      if (hasStoredImage) {
+        console.log(`[ImageGen] Editing with stored image: "${imgPrompt.substring(0, 100)}"`);
+      } else {
+        console.log(`[ImageGen] Generating from text: "${imgPrompt.substring(0, 100)}"`);
+      }
+      const result = await generateImage(
+        imgPrompt,
+        hasStoredImage ? lastImageBase64 : null,
+        hasStoredImage ? lastImageMimeType : null
+      );
+      if (result.images.length > 0) {
+        for (const img of result.images) {
+          const dataUrl = img.image_url?.url || img.url || '';
+          const base64Data = dataUrl.replace(/^data:image\/\w+;base64,/, '');
+          if (base64Data) {
+            const buffer = Buffer.from(base64Data, 'base64');
+            await bot.sendPhoto(chatId, buffer, { caption: imgPrompt.substring(0, 200) });
+          }
+        }
+        console.log(`[ImageGen] Sent ${result.images.length} image(s)`);
+      } else {
+        console.log('[ImageGen] No images returned');
+        await bot.sendMessage(chatId, '⚠️ El modelo no devolvió imágenes. Probá con otro modelo (/imagen).');
+      }
+    } catch (imgErr) {
+      console.error('[ImageGen Error]', imgErr.message);
+      await bot.sendMessage(chatId, `❌ Error generando imagen: ${imgErr.message.substring(0, 200)}`);
+    }
+  }
+
+  // Video generation
+  const vidMatch = cleanText.match(/\[GENVID\]([\s\S]*?)\[\/GENVID\]/);
+  if (vidMatch) {
+    const vidPrompt = vidMatch[1].trim();
+    cleanText = cleanText.replace(/\[GENVID\][\s\S]*?\[\/GENVID\]/, '').trim();
+    let statusMsg;
+    try {
+      statusMsg = await bot.sendMessage(chatId, '🎬 Generando video... esto puede tomar unos minutos.');
+      if (hasStoredImage) {
+        console.log(`[VideoGen] Image-to-video: "${vidPrompt.substring(0, 100)}"`);
+      } else {
+        console.log(`[VideoGen] Text-to-video: "${vidPrompt.substring(0, 100)}"`);
+      }
+      const result = await generateVideo(
+        vidPrompt,
+        chatId,
+        hasStoredImage ? lastImageBase64 : null,
+        hasStoredImage ? lastImageMimeType : null
+      );
+      let videoUrl = result.url || result.video_url || result.output?.url
+        || (result.unsigned_urls && result.unsigned_urls[0]);
+      // If unsigned_url is a relative path, build full URL
+      if (videoUrl && videoUrl.startsWith('/')) {
+        videoUrl = `https://openrouter.ai${videoUrl}`;
+      }
+      if (videoUrl) {
+        console.log(`[VideoGen] Downloading video from: ${videoUrl.substring(0, 100)}`);
+        // Download video to buffer first (some URLs require auth headers)
+        try {
+          const videoResponse = await axios.get(videoUrl, {
+            headers: { 'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}` },
+            responseType: 'arraybuffer',
+            timeout: 60000
+          });
+          const videoBuffer = Buffer.from(videoResponse.data);
+          await bot.sendVideo(chatId, videoBuffer, { caption: vidPrompt.substring(0, 200) }, { filename: 'video.mp4', contentType: 'video/mp4' });
+        } catch (dlErr) {
+          console.log(`[VideoGen] Direct download failed, trying URL directly: ${dlErr.message}`);
+          await bot.sendVideo(chatId, videoUrl, { caption: vidPrompt.substring(0, 200) });
+        }
+        console.log(`[VideoGen] Video sent`);
+      } else {
+        await bot.sendMessage(chatId, '⚠️ Video generado pero no se pudo obtener la URL.');
+        console.log(`[VideoGen] No URL in response: ${JSON.stringify(result).substring(0, 300)}`);
+      }
+      if (statusMsg) await bot.deleteMessage(chatId, statusMsg.message_id).catch(() => {});
+    } catch (vidErr) {
+      console.error('[VideoGen Error]', vidErr.message);
+      await bot.sendMessage(chatId, `❌ Error generando video: ${vidErr.message.substring(0, 200)}`);
+      if (statusMsg) await bot.deleteMessage(chatId, statusMsg.message_id).catch(() => {});
+    }
+  }
+
+  return cleanText;
+}
+
+// One-shot OpenClaude call for image processing when persistent process isn't available (e.g. Codex provider)
+async function callOpenClaudeOneShot(userMessage, imageBase64, imageMimeType) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      proc.kill('SIGTERM');
+      reject(new Error('OpenClaude one-shot timeout (5 min)'));
+    }, 5 * 60 * 1000);
+
+    const proc = spawn('openclaude', [
+      '--model', 'sonnet',
+      '--output-format', 'stream-json',
+      '--input-format', 'stream-json',
+      '--dangerously-skip-permissions',
+      '--verbose'
+    ], { cwd: '/app', env: { ...process.env, HOME: '/app' }, stdio: ['pipe', 'pipe', 'pipe'] });
+
+    // Send the image via stdin as stream-json
+    const inputMsg = {
+      type: 'user',
+      session_id: '',
+      message: {
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: imageMimeType, data: imageBase64 } },
+          { type: 'text', text: userMessage }
+        ]
+      },
+      parent_tool_use_id: null
+    };
+    proc.stdin.write(JSON.stringify(inputMsg) + '\n');
+    proc.stdin.end();
+
+    let assistantResult = '';
+    let buffer = '';
+    proc.stdout.on('data', (chunk) => {
+      buffer += chunk.toString();
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const msg = JSON.parse(line);
+          if (msg.type === 'assistant' && msg.message?.content) {
+            const text = msg.message.content.filter(c => c.type === 'text').map(c => c.text).join('');
+            if (text) assistantResult = text;
+            // Update StatusCard with tool actions from OneShot
+            if (activeStatusCard) {
+              const toolCalls = msg.message.content.filter(c => c.type === 'tool_use');
+              if (toolCalls.length > 0) {
+                const tool = toolCalls[0];
+                const labelFn = TOOL_LABELS[tool.name];
+                const actionText = labelFn ? labelFn(tool.input || {}) : tool.name;
+                activeStatusCard.updateAction(actionText);
+              } else if (text && toolCalls.length === 0) {
+                const thought = text.trim().substring(0, 60);
+                if (thought) activeStatusCard.updateAction(thought);
+              }
+            }
+          } else if (msg.type === 'result') {
+            assistantResult = assistantResult || msg.result || '';
+          }
+        } catch (e) { /* not json */ }
+      }
+    });
+    proc.stderr.on('data', (d) => {
+      const t = d.toString().trim();
+      if (t) console.error(`[OpenClaude OneShot stderr] ${t}`);
+    });
+    proc.on('close', () => {
+      clearTimeout(timeout);
+      if (assistantResult) resolve(assistantResult);
+      else reject(new Error('OpenClaude one-shot: no response'));
+    });
+
+    console.log(`[OpenClaude OneShot] Spawned for image processing (pid: ${proc.pid})`);
+  });
+}
+
 async function callMaximus(userMessage, imageBase64 = null, imageMimeType = null) {
-  if (currentProvider === 'codex') return callCodex(userMessage);
+  console.log(`[callMaximus] ENTRY — imageBase64: ${imageBase64 ? imageBase64.length + ' chars' : 'NULL'}, provider: ${currentProvider}`);
+  // For images: only Anthropic (via persistent OpenClaude) supports vision natively
+  // All other providers (Codex, Ollama, OpenRouter) fall back to OpenClaude one-shot for image analysis
+  if (imageBase64 && currentProvider !== 'anthropic') {
+    console.log(`[callMaximus] Image received but provider "${currentProvider}" may not support vision — using OpenClaude one-shot`);
+    return callOpenClaudeOneShot(userMessage, imageBase64, imageMimeType);
+  }
+  if (currentProvider === 'codex') {
+    return callCodex(userMessage);
+  }
   if (!openclaudeProcess) {
     throw new Error('OpenClaude process not running');
   }
@@ -695,7 +1163,16 @@ async function callMaximus(userMessage, imageBase64 = null, imageMimeType = null
       console.log(`[OpenClaude] Still working... (${mins}m ${elapsed % 60}s)`);
     }, OPENCLAUDE_NOTIFY_INTERVAL_MS);
 
-    openclaudeProcess.stdin.write(JSON.stringify(inputMsg) + '\n');
+    const jsonPayload = JSON.stringify(inputMsg);
+    if (imageBase64) {
+      const payloadSizeMB = (Buffer.byteLength(jsonPayload) / 1024 / 1024).toFixed(2);
+      console.log(`[OpenClaude] Sending image message. base64 length: ${imageBase64.length} chars, payload: ${payloadSizeMB} MB, mime: ${imageMimeType}`);
+      console.log(`[OpenClaude] Image content structure: ${JSON.stringify(content.map(c => c.type === 'image' ? {type: c.type, source_type: c.source.type, media_type: c.source.media_type, data_len: c.source.data.length} : c))}`);
+    }
+    const written = openclaudeProcess.stdin.write(jsonPayload + '\n');
+    if (!written) {
+      console.warn('[OpenClaude] stdin backpressure — large payload may be buffering');
+    }
   });
 }
 
@@ -738,18 +1215,34 @@ class StatusCard {
     }
   }
 
+  updateAction(actionText) {
+    if (this.currentStep >= 0 && this.currentStep < this.steps.length) {
+      const step = this.steps[this.currentStep];
+      if (!step.originalLabel) step.originalLabel = step.label;
+      step.label = actionText ? `${step.originalLabel} — ${actionText}` : step.originalLabel;
+      this._update();
+    }
+  }
+
   async complete() {
     this._stopTimers();
+    if (activeStatusCard === this) activeStatusCard = null;
     for (const s of this.steps) { if (s.status !== 'done') s.status = 'done'; }
     try {
       if (this.messageId) {
-        await this.bot.deleteMessage(this.chatId, this.messageId);
+        const mid = this.messageId;
+        this.messageId = null;
+        // Edit to minimal text first to force Telegram client re-render
+        await this.bot.editMessageText('.', { chat_id: this.chatId, message_id: mid }).catch(() => {});
+        await new Promise(r => setTimeout(r, 500));
+        await this.bot.deleteMessage(this.chatId, mid);
       }
-    } catch (e) { /* message already deleted or too old */ }
+    } catch (e) { /* already deleted */ }
   }
 
   async fail(errorMsg) {
     this._stopTimers();
+    if (activeStatusCard === this) activeStatusCard = null;
     if (this.currentStep >= 0 && this.currentStep < this.steps.length) {
       this.steps[this.currentStep].status = 'fail';
     }
@@ -1010,6 +1503,132 @@ bot.onText(/\/models/, async (msg) => {
   });
 });
 
+// --- Image model page builder ---
+async function showImageModelPage(chatId, messageId, providerId, page) {
+  const provider = IMAGE_PROVIDERS[providerId];
+  if (!provider) return;
+  const models = provider.models;
+  const totalPages = Math.ceil(models.length / MODELS_PER_PAGE);
+  const start = page * MODELS_PER_PAGE;
+  const pageModels = models.slice(start, start + MODELS_PER_PAGE);
+  const buttons = [];
+  for (let i = 0; i < pageModels.length; i += 2) {
+    const row = [];
+    const m1 = pageModels[i];
+    row.push({
+      text: `${m1.id === currentImageModel ? '✅ ' : ''}${m1.label} (${m1.price})`,
+      callback_data: `imgmdl:${providerId}:${m1.id}`
+    });
+    if (pageModels[i + 1]) {
+      const m2 = pageModels[i + 1];
+      row.push({
+        text: `${m2.id === currentImageModel ? '✅ ' : ''}${m2.label} (${m2.price})`,
+        callback_data: `imgmdl:${providerId}:${m2.id}`
+      });
+    }
+    buttons.push(row);
+  }
+  const navRow = [];
+  if (page > 0) navRow.push({ text: '⬅️ Anterior', callback_data: `imgpage:${providerId}:${page - 1}` });
+  navRow.push({ text: `${page + 1}/${totalPages}`, callback_data: 'noop' });
+  if (page < totalPages - 1) navRow.push({ text: 'Siguiente ➡️', callback_data: `imgpage:${providerId}:${page + 1}` });
+  buttons.push(navRow);
+  buttons.push([{ text: '⬅️ Volver a proveedores', callback_data: 'imgback' }]);
+  const text = `🎨 *${provider.label}* — Página ${page + 1}/${totalPages}\n\nEscogé un modelo de imagen:`;
+  const opts = { parse_mode: 'Markdown', reply_markup: { inline_keyboard: buttons } };
+  if (messageId) {
+    await bot.editMessageText(text, { chat_id: chatId, message_id: messageId, ...opts });
+  } else {
+    await bot.sendMessage(chatId, text, opts);
+  }
+}
+
+// --- Video model page builder ---
+async function showVideoModelPage(chatId, messageId, providerId, page) {
+  const provider = VIDEO_PROVIDERS[providerId];
+  if (!provider) return;
+  const models = provider.models;
+  const totalPages = Math.ceil(models.length / MODELS_PER_PAGE);
+  const start = page * MODELS_PER_PAGE;
+  const pageModels = models.slice(start, start + MODELS_PER_PAGE);
+  const buttons = [];
+  for (let i = 0; i < pageModels.length; i += 2) {
+    const row = [];
+    const m1 = pageModels[i];
+    row.push({
+      text: `${m1.id === currentVideoModel ? '✅ ' : ''}${m1.label} (${m1.price})`,
+      callback_data: `vidmdl:${providerId}:${m1.id}`
+    });
+    if (pageModels[i + 1]) {
+      const m2 = pageModels[i + 1];
+      row.push({
+        text: `${m2.id === currentVideoModel ? '✅ ' : ''}${m2.label} (${m2.price})`,
+        callback_data: `vidmdl:${providerId}:${m2.id}`
+      });
+    }
+    buttons.push(row);
+  }
+  const navRow = [];
+  if (page > 0) navRow.push({ text: '⬅️ Anterior', callback_data: `vidpage:${providerId}:${page - 1}` });
+  navRow.push({ text: `${page + 1}/${totalPages}`, callback_data: 'noop' });
+  if (page < totalPages - 1) navRow.push({ text: 'Siguiente ➡️', callback_data: `vidpage:${providerId}:${page + 1}` });
+  buttons.push(navRow);
+  buttons.push([{ text: '⬅️ Volver a proveedores', callback_data: 'vidback' }]);
+  const text = `🎬 *${provider.label}* — Página ${page + 1}/${totalPages}\n\nEscogé un modelo de video:`;
+  const opts = { parse_mode: 'Markdown', reply_markup: { inline_keyboard: buttons } };
+  if (messageId) {
+    await bot.editMessageText(text, { chat_id: chatId, message_id: messageId, ...opts });
+  } else {
+    await bot.sendMessage(chatId, text, opts);
+  }
+}
+
+// --- /imagen command ---
+bot.onText(/\/image[n]?(?:@\w+)?$/i, async (msg) => {
+  console.log('[Command] /imagen received');
+  if (!isAllowed(msg)) return;
+  const chatId = msg.chat.id;
+  const provider = IMAGE_PROVIDERS[currentImageProvider];
+  const modelInfo = provider?.models.find(m => m.id === currentImageModel);
+  const modelLabel = modelInfo ? modelInfo.label : currentImageModel;
+  const allButtons = Object.entries(IMAGE_PROVIDERS).map(([id, p]) => ({
+    text: `${id === currentImageProvider ? '✅ ' : ''}${p.label}`,
+    callback_data: `imgprov:${id}`
+  }));
+  const keyboard = [];
+  for (let i = 0; i < allButtons.length; i += 2) {
+    keyboard.push(allButtons.slice(i, i + 2));
+  }
+  await bot.sendMessage(chatId,
+    `🎨 *Modelo de imagen activo:* ${provider.label} / ${modelLabel}\n\nEscogé un proveedor:`, {
+    parse_mode: 'Markdown',
+    reply_markup: { inline_keyboard: keyboard }
+  });
+});
+
+// --- /video command ---
+bot.onText(/\/video[s]?(?:@\w+)?$/i, async (msg) => {
+  console.log('[Command] /video received');
+  if (!isAllowed(msg)) return;
+  const chatId = msg.chat.id;
+  const provider = VIDEO_PROVIDERS[currentVideoProvider];
+  const modelInfo = provider?.models.find(m => m.id === currentVideoModel);
+  const modelLabel = modelInfo ? modelInfo.label : currentVideoModel;
+  const allButtons = Object.entries(VIDEO_PROVIDERS).map(([id, p]) => ({
+    text: `${id === currentVideoProvider ? '✅ ' : ''}${p.label}`,
+    callback_data: `vidprov:${id}`
+  }));
+  const keyboard = [];
+  for (let i = 0; i < allButtons.length; i += 2) {
+    keyboard.push(allButtons.slice(i, i + 2));
+  }
+  await bot.sendMessage(chatId,
+    `🎬 *Modelo de video activo:* ${provider.label} / ${modelLabel}\n\nEscogé un proveedor:`, {
+    parse_mode: 'Markdown',
+    reply_markup: { inline_keyboard: keyboard }
+  });
+});
+
 // --- Handle inline keyboard button presses ---
 bot.on('callback_query', async (query) => {
   if (!isAllowed({ from: query.from })) {
@@ -1082,6 +1701,102 @@ bot.on('callback_query', async (query) => {
         });
       } catch (e) { /* message already deleted */ }
     }, 3000);
+    return;
+  }
+
+  // --- Image provider/model callbacks ---
+  if (data.startsWith('imgprov:')) {
+    const providerId = data.split(':')[1];
+    await showImageModelPage(chatId, messageId, providerId, 0);
+    return;
+  }
+  if (data.startsWith('imgpage:')) {
+    const [, providerId, pageStr] = data.split(':');
+    await showImageModelPage(chatId, messageId, providerId, parseInt(pageStr));
+    return;
+  }
+  if (data.startsWith('imgmdl:')) {
+    const parts = data.split(':');
+    const providerId = parts[1];
+    const modelId = parts.slice(2).join(':');
+    const provider = IMAGE_PROVIDERS[providerId];
+    if (!provider) return;
+    const modelInfo = provider.models.find(m => m.id === modelId);
+    if (modelId === currentImageModel) {
+      await bot.editMessageText(`✅ Ya estás usando *${modelInfo?.label || modelId}* para imágenes`, {
+        chat_id: chatId, message_id: messageId, parse_mode: 'Markdown'
+      });
+      return;
+    }
+    currentImageProvider = providerId;
+    currentImageModel = modelId;
+    await bot.editMessageText(`✅ Modelo de imagen: *${provider.label}* / *${modelInfo?.label || modelId}*`, {
+      chat_id: chatId, message_id: messageId, parse_mode: 'Markdown'
+    });
+    return;
+  }
+  if (data === 'imgback') {
+    const provider = IMAGE_PROVIDERS[currentImageProvider];
+    const modelInfo = provider?.models.find(m => m.id === currentImageModel);
+    const allButtons = Object.entries(IMAGE_PROVIDERS).map(([id, p]) => ({
+      text: `${id === currentImageProvider ? '✅ ' : ''}${p.label}`,
+      callback_data: `imgprov:${id}`
+    }));
+    const keyboard = [];
+    for (let i = 0; i < allButtons.length; i += 2) keyboard.push(allButtons.slice(i, i + 2));
+    await bot.editMessageText(
+      `🎨 *Modelo de imagen activo:* ${provider.label} / ${modelInfo?.label || currentImageModel}\n\nEscogé un proveedor:`, {
+      chat_id: chatId, message_id: messageId, parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: keyboard }
+    });
+    return;
+  }
+
+  // --- Video provider/model callbacks ---
+  if (data.startsWith('vidprov:')) {
+    const providerId = data.split(':')[1];
+    await showVideoModelPage(chatId, messageId, providerId, 0);
+    return;
+  }
+  if (data.startsWith('vidpage:')) {
+    const [, providerId, pageStr] = data.split(':');
+    await showVideoModelPage(chatId, messageId, providerId, parseInt(pageStr));
+    return;
+  }
+  if (data.startsWith('vidmdl:')) {
+    const parts = data.split(':');
+    const providerId = parts[1];
+    const modelId = parts.slice(2).join(':');
+    const provider = VIDEO_PROVIDERS[providerId];
+    if (!provider) return;
+    const modelInfo = provider.models.find(m => m.id === modelId);
+    if (modelId === currentVideoModel) {
+      await bot.editMessageText(`✅ Ya estás usando *${modelInfo?.label || modelId}* para video`, {
+        chat_id: chatId, message_id: messageId, parse_mode: 'Markdown'
+      });
+      return;
+    }
+    currentVideoProvider = providerId;
+    currentVideoModel = modelId;
+    await bot.editMessageText(`✅ Modelo de video: *${provider.label}* / *${modelInfo?.label || modelId}*`, {
+      chat_id: chatId, message_id: messageId, parse_mode: 'Markdown'
+    });
+    return;
+  }
+  if (data === 'vidback') {
+    const provider = VIDEO_PROVIDERS[currentVideoProvider];
+    const modelInfo = provider?.models.find(m => m.id === currentVideoModel);
+    const allButtons = Object.entries(VIDEO_PROVIDERS).map(([id, p]) => ({
+      text: `${id === currentVideoProvider ? '✅ ' : ''}${p.label}`,
+      callback_data: `vidprov:${id}`
+    }));
+    const keyboard = [];
+    for (let i = 0; i < allButtons.length; i += 2) keyboard.push(allButtons.slice(i, i + 2));
+    await bot.editMessageText(
+      `🎬 *Modelo de video activo:* ${provider.label} / ${modelInfo?.label || currentVideoModel}\n\nEscogé un proveedor:`, {
+      chat_id: chatId, message_id: messageId, parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: keyboard }
+    });
     return;
   }
 
@@ -2064,6 +2779,7 @@ bot.onText(/\/help$/, async (msg) => {
 
 // --- Message Handler ---
 bot.on('message', async (msg) => {
+  if (msg.text) console.log(`[MSG RAW] "${msg.text}"`);
   if (!isAllowed(msg)) {
     console.log(`[Blocked] User ${msg.from?.id} (${msg.from?.username}) intentó enviar mensaje`);
     return;
@@ -2087,6 +2803,7 @@ bot.on('message', async (msg) => {
         ['🧠', 'Pensando'],
         ['🔊', 'Generando respuesta'],
       ]);
+      activeStatusCard = status;
 
       const inputAudio = path.join(TMP_DIR, `input_${timestamp}.oga`);
       const ttsRaw = path.join(TMP_DIR, `tts_raw_${timestamp}.ogg`);
@@ -2110,26 +2827,44 @@ bot.on('message', async (msg) => {
         await status.advance(); // → Pensando
         const audioPrompt = `[Este mensaje viene de un audio de Jose] ${transcription}`;
         console.log(`[Audio] Enviando a OpenClaude: "${audioPrompt.substring(0, 200)}"`);
-        let rawResponse = await callMaximus(audioPrompt);
+        // Attach recent image if available
+        let audioImgB64 = null;
+        let audioImgMime = null;
+        if (lastImageBase64 && (Date.now() - lastImageTimestamp) < IMAGE_CONTEXT_TTL_MS) {
+          audioImgB64 = lastImageBase64;
+          audioImgMime = lastImageMimeType;
+          console.log(`[Image Context] Attaching stored image to audio message`);
+        }
+        let rawResponse = await callMaximus(audioPrompt, audioImgB64, audioImgMime);
         rawResponse = await handleDelegation(rawResponse);
 
         const formatMatch = rawResponse.match(/^\[(AUDIO|TEXTO)\]\s*/i);
-        const outputFormat = formatMatch ? formatMatch[1].toUpperCase() : 'AUDIO';
+        let outputFormat = formatMatch ? formatMatch[1].toUpperCase() : 'AUDIO';
         let responseText = rawResponse.replace(/^\[(AUDIO|TEXTO)\]\s*/i, '').trim();
 
         try { responseText = memory.extractAndSaveMemories(responseText); } catch (memErr) { console.error('[Memory Extract Error]', memErr.message); }
 
+        // Force TEXTO when generating images/videos
+        const hasMediaAudio = /\[GENIMG\]|\[GENVID\]/i.test(responseText);
+        if (hasMediaAudio && outputFormat === 'AUDIO') {
+          console.log('[Format] Forcing TEXTO — response contains image/video generation tags');
+          outputFormat = 'TEXTO';
+        }
+
+        // Process image/video generation tags
+        responseText = await processMediaTags(responseText, chatId);
+
         await status.advance(); // → Generando respuesta
 
         if (outputFormat === 'TEXTO') {
+          if (responseText) await sendTextResponse(chatId, responseText);
           await status.complete();
-          await sendTextResponse(chatId, responseText);
           console.log(`[Maximus] Respuesta de audio transcrita -> texto enviado (${responseText.length} chars)`);
         } else {
           await textToSpeech(responseText, ttsRaw);
           await boostVolume(ttsRaw, ttsBoosted);
-          await status.complete();
           await bot.sendVoice(chatId, ttsBoosted);
+          await status.complete();
           console.log(`[Maximus] Voice note enviada`);
         }
 
@@ -2158,6 +2893,7 @@ bot.on('message', async (msg) => {
         ['🧠', 'Pensando'],
         ['💬', 'Preparando respuesta'],
       ]);
+      activeStatusCard = status;
 
       const imgPath = path.join(TMP_DIR, `telegram_img_${timestamp}.jpg`);
       const ttsRaw = path.join(TMP_DIR, `tts_raw_${timestamp}.ogg`);
@@ -2175,31 +2911,48 @@ bot.on('message', async (msg) => {
         const imageBase64 = imageBuffer.toString('base64');
         const mimeType = msg.document?.mime_type || 'image/jpeg';
 
+        // Store image for follow-up text messages
+        lastImageBase64 = imageBase64;
+        lastImageMimeType = mimeType;
+        lastImageTimestamp = Date.now();
+        console.log(`[Image Context] Stored image (${imageBase64.length} chars) — available for ${IMAGE_CONTEXT_TTL_MS / 60000} min`);
+
         const imgMessage = caption
-          ? `[IMAGEN enviada por Jose] Caption: "${caption}". Respondé en base a lo que ves.`
-          : '[IMAGEN enviada por Jose] Sin caption. Respondé en base a lo que ves en la imagen.';
+          ? `[IMAGEN enviada por Jose] Caption: "${caption}". Respondé en base a lo que ves. IMPORTANTE: Jose te envió esta imagen, recordala para mensajes siguientes.`
+          : '[IMAGEN enviada por Jose] Sin caption. Respondé en base a lo que ves en la imagen. IMPORTANTE: Jose te envió esta imagen, recordala para mensajes siguientes.';
 
         await status.advance(); // → Pensando
+        console.log(`[Image Debug] About to call callMaximus. base64 length: ${imageBase64?.length || 'NULL'}, mime: ${mimeType}, msg: "${imgMessage.substring(0, 80)}"`);
         let rawResponse = await callMaximus(imgMessage, imageBase64, mimeType);
         rawResponse = await handleDelegation(rawResponse);
 
         const formatMatch = rawResponse.match(/^\[(AUDIO|TEXTO)\]\s*/i);
-        const outputFormat = formatMatch ? formatMatch[1].toUpperCase() : 'TEXTO';
+        let outputFormat = formatMatch ? formatMatch[1].toUpperCase() : 'TEXTO';
         let responseText = rawResponse.replace(/^\[(AUDIO|TEXTO)\]\s*/i, '').trim();
 
         try { responseText = memory.extractAndSaveMemories(responseText); } catch (memErr) { console.error('[Memory Extract Error]', memErr.message); }
+
+        // Force TEXTO when generating images/videos
+        const hasMediaImg = /\[GENIMG\]|\[GENVID\]/i.test(responseText);
+        if (hasMediaImg && outputFormat === 'AUDIO') {
+          console.log('[Format] Forcing TEXTO — response contains image/video generation tags');
+          outputFormat = 'TEXTO';
+        }
+
+        // Process image/video generation tags
+        responseText = await processMediaTags(responseText, chatId);
 
         await status.advance(); // → Preparando respuesta
 
         if (outputFormat === 'AUDIO') {
           await textToSpeech(responseText, ttsRaw);
           await boostVolume(ttsRaw, ttsBoosted);
-          await status.complete();
           await bot.sendVoice(chatId, ttsBoosted);
+          await status.complete();
           console.log(`[Maximus] Voice note enviada (imagen)`);
         } else {
+          if (responseText) await sendTextResponse(chatId, responseText);
           await status.complete();
-          await sendTextResponse(chatId, responseText);
           console.log(`[Maximus] Texto enviado (imagen ${responseText.length} chars)`);
         }
 
@@ -2266,6 +3019,7 @@ async function handleTextMessage(chatId, text, timestamp) {
     ['🧠', 'Pensando'],
     ['💬', 'Preparando respuesta'],
   ]);
+  activeStatusCard = status;
 
   const ttsRaw = path.join(TMP_DIR, `tts_raw_${timestamp}.ogg`);
   const ttsBoosted = path.join(TMP_DIR, `tts_boost_${timestamp}.ogg`);
@@ -2279,26 +3033,45 @@ async function handleTextMessage(chatId, text, timestamp) {
       console.log(`[Jina] Mensaje enriquecido con contenido de URLs`);
     }
     await status.advance(); // → Pensando
-    let rawResponse = await callMaximus(enrichedText);
+
+    // Check if there's a recent image in context to attach
+    let imgB64 = null;
+    let imgMime = null;
+    if (lastImageBase64 && (Date.now() - lastImageTimestamp) < IMAGE_CONTEXT_TTL_MS) {
+      imgB64 = lastImageBase64;
+      imgMime = lastImageMimeType;
+      console.log(`[Image Context] Attaching stored image to text message (age: ${Math.round((Date.now() - lastImageTimestamp) / 1000)}s)`);
+    }
+    let rawResponse = await callMaximus(enrichedText, imgB64, imgMime);
     rawResponse = await handleDelegation(rawResponse);
 
     const formatMatch = rawResponse.match(/^\[(AUDIO|TEXTO)\]\s*/i);
-    const outputFormat = formatMatch ? formatMatch[1].toUpperCase() : 'TEXTO';
+    let outputFormat = formatMatch ? formatMatch[1].toUpperCase() : 'TEXTO';
     let responseText = rawResponse.replace(/^\[(AUDIO|TEXTO)\]\s*/i, '').trim();
 
     try { responseText = memory.extractAndSaveMemories(responseText); } catch (memErr) { console.error('[Memory Extract Error]', memErr.message); }
+
+    // Force TEXTO when generating images/videos — audio response makes no sense with media
+    const hasMedia = /\[GENIMG\]|\[GENVID\]/i.test(responseText);
+    if (hasMedia && outputFormat === 'AUDIO') {
+      console.log('[Format] Forcing TEXTO — response contains image/video generation tags');
+      outputFormat = 'TEXTO';
+    }
+
+    // Process image/video generation tags
+    responseText = await processMediaTags(responseText, chatId);
 
     await status.advance(); // → Preparando respuesta
 
     if (outputFormat === 'AUDIO') {
       await textToSpeech(responseText, ttsRaw);
       await boostVolume(ttsRaw, ttsBoosted);
-      await status.complete();
       await bot.sendVoice(chatId, ttsBoosted);
+      await status.complete();
       console.log(`[Maximus] Voice note enviada (desde texto)`);
     } else {
+      if (responseText) await sendTextResponse(chatId, responseText);
       await status.complete();
-      await sendTextResponse(chatId, responseText);
       console.log(`[Maximus] Respuesta enviada (${responseText.length} chars)`);
     }
 
@@ -2367,6 +3140,34 @@ async function runDailySummary() {
 
 // Start the daily summary cron
 scheduleDailySummary();
+
+// --- Dreaming Cron (3 AM) ---
+function scheduleDreaming() {
+  const now = new Date();
+  const target = new Date();
+  target.setHours(3, 0, 0, 0);
+
+  // If already past 3 AM today, schedule for tomorrow
+  if (now >= target) {
+    target.setDate(target.getDate() + 1);
+  }
+
+  const msUntil = target.getTime() - now.getTime();
+  console.log(`[Cron] Dreaming scheduled in ${Math.round(msUntil / 60000)} minutes`);
+
+  setTimeout(async () => {
+    try {
+      console.log('[Cron] Starting dream cycle...');
+      await dreaming.dream();
+      console.log('[Cron] Dream cycle completed');
+    } catch (err) {
+      console.error('[Cron Error] Dreaming failed:', err.message);
+    }
+    scheduleDreaming();
+  }, msUntil);
+}
+
+scheduleDreaming();
 
 // ─── Linear Integration ───────────────────────────────────────
 linear.start({

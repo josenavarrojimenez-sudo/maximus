@@ -6,6 +6,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     make \
     g++ \
     curl \
+    git \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Docker CLI + compose + buildx from host
@@ -21,7 +23,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
-COPY bot.js memory.js linear.js deriver.js system-prompt.txt CLAUDE.md entrypoint.sh ./
+COPY bot.js memory.js linear.js deriver.js dreaming.js memory-config.json system-prompt.txt CLAUDE.md entrypoint.sh ./
 COPY identity/ identity/
 COPY memory-seed/ memory-seed/
 

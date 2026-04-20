@@ -1,0 +1,67 @@
+{
+  "embedding": {
+    "provider": "voyage",
+    "model": "voyage-3-lite",
+    "dimensions": 512,
+    "batchSize": 20,
+    "cacheEnabled": true
+  },
+  "search": {
+    "defaultLimit": 10,
+    "weights": {
+      "vector": 0.55,
+      "keyword": 0.30,
+      "recency": 0.15
+    },
+    "temporalDecayHalfLifeDays": 14,
+    "mmrLambda": 0.7,
+    "minRelevanceScore": 0.25
+  },
+  "dreaming": {
+    "enabled": true,
+    "cronSchedule": "0 3 * * *",
+    "phases": {
+      "light": {
+        "enabled": true,
+        "description": "Categorize and tag recent memories",
+        "minMessages": 4
+      },
+      "rem": {
+        "enabled": true,
+        "description": "Connect related memories, find patterns",
+        "minConnections": 2
+      },
+      "deep": {
+        "enabled": true,
+        "description": "Consolidate into long-term canon, prune duplicates",
+        "promotionThreshold": 0.7
+      }
+    },
+    "scoring": {
+      "frequency": 0.24,
+      "relevance": 0.30,
+      "recency": 0.18,
+      "importance": 0.15,
+      "emotional": 0.08,
+      "uniqueness": 0.05
+    }
+  },
+  "wiki": {
+    "enabled": true,
+    "dir": "wiki",
+    "contradictionDetection": true,
+    "autoConsolidate": true
+  },
+  "compaction": {
+    "flushBeforeCompaction": true,
+    "maxContextTokens": 8000,
+    "preserveRecentMessages": 5
+  },
+  "storage": {
+    "dataDir": "/app/data",
+    "memoryDir": "/app/data/memory",
+    "dbPath": "/app/data/maximus.db",
+    "conversationGapMs": 1800000,
+    "maxRecentMessages": 10
+  }
+}
