@@ -1344,7 +1344,13 @@ async function callAgent(userMessage, imageBase64 = null, imageMimeType = null) 
     return callOpenClaudeOneShot(userMessage, imageBase64, imageMimeType);
   }
   if (currentProvider === 'codex') return callCodex(userMessage);
-  if (!openclaudeProcess) throw new Error('OpenClaude process not running');
+  if (!openclaudeProcess) {
+    console.log('[callAgent] OpenClaude process not running — auto-spawning...');
+    spawnOpenClaude();
+    // Wait briefly for process to start before throwing
+    await new Promise(r => setTimeout(r, 2000));
+    if (!openclaudeProcess) throw new Error('OpenClaude process not running — spawn failed');
+  }
   if (pendingResolve) throw new Error('Already processing a message');
 
   let content;
@@ -2470,6 +2476,8 @@ bot.on('message', async (msg) => {
         }
         let rawResponse = await callAgent(audioPrompt, audioImgB64, audioImgMime);
         rawResponse = await handleDelegation(rawResponse);
+        // Check if agent explicitly requested audio BEFORE stripping the tag
+        const wantsAudio = /^\[AUDIO\]/i.test(rawResponse);
         let responseText = rawResponse.replace(/^\[(AUDIO|TEXTO)\]\s*/i, '').trim();
 
         // Force TEXTO when generating images/videos
@@ -2481,14 +2489,23 @@ bot.on('message', async (msg) => {
         // Process image/video generation tags
         responseText = await processMediaTags(responseText, chatId);
 
-        await status.advance(); // → Generando audio
         try { responseText = memory.extractAndSaveMemories(responseText); } catch (memErr) { console.error('[Memory Extract Error]', memErr.message); }
-        const ttsText = cleanTextForTTS(responseText);
-        await textToSpeech(ttsText, ttsRaw);
-        await boostVolume(ttsRaw, ttsBoosted);
-        await bot.sendVoice(chatId, ttsBoosted);
-        await status.complete();
-        console.log(`[${AGENT_NAME}] Voice note enviada`);
+
+        if (wantsAudio && !hasMediaAudio) {
+          // Agent explicitly requested audio response
+          await status.advance(); // → Generando audio
+          const ttsText = cleanTextForTTS(responseText);
+          await textToSpeech(ttsText, ttsRaw);
+          await boostVolume(ttsRaw, ttsBoosted);
+          await bot.sendVoice(chatId, ttsBoosted);
+          await status.complete();
+          console.log(`[${AGENT_NAME}] Voice note enviada`);
+        } else {
+          // Default: send as text (agent said [TEXTO] or no explicit [AUDIO])
+          console.log(`[${AGENT_NAME}] Audio input but agent responded with TEXTO — sending text`);
+          await sendTextResponse(chatId, responseText);
+          await status.complete();
+        }
         try { memory.saveExchange(`[Audio: "${transcription.substring(0, 150)}"]`, responseText); honcho.updateUserModel({ user: transcription, assistant: responseText }).catch(() => {}); } catch (e) { console.error('[DB Error]', e.message); }
         postExchangeHook(transcription, responseText);
         postExchangeHook(transcription, responseText);
