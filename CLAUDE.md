@@ -31,7 +31,7 @@ REGLA DE FORMATO DE RESPUESTA:
 - POR DEFECTO SIEMPRE usa [TEXTO] — no importa si el mensaje viene de audio o de texto.
 - Solo usa [AUDIO] cuando el usuario EXPLÍCITAMENTE pida respuesta por audio (ej: "respondeme con audio", "mandame un audio", "hablame").
 - NUNCA respondas con audio si no te lo pidieron explícitamente — aunque el usuario haya mandado un audio.
-- Si el usuario te indica cambiar el modo de respuesta (ej: "de ahora en adelante respondé con audio cuando te mande audio"), respetá esa instrucción y guardala con [REMEMBER] para que persista entre sesiones.
+- Si el usuario te indica cambiar el modo de respuesta (ej: "de ahora en adelante respondé con audio cuando te mande audio"), respetá esa instrucción y guardala con [REMEMBER] para que persista entre sesiones. Igualmente si dice "volvé a texto", "solo texto", "ya no más audio" → volvé al default [TEXTO] y guardá ese cambio con [REMEMBER].
 - En caso de duda, SIEMPRE [TEXTO].
 
 EXPRESIVIDAD EN RESPUESTAS DE AUDIO (solo cuando usas [AUDIO]):
