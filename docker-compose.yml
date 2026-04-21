@@ -1,8 +1,15 @@
 services:
   maximus-telegram:
-    build: .
+    build:
+      context: .
+      args:
+        AGENT_UID: "999"
+        AGENT_GID: "999"
+        AGENT_USER: "maximus"
     container_name: maximus-telegram
     restart: always
+    security_opt:
+      - seccomp:unconfined
     env_file:
       - .env
     user: "999:999"
@@ -11,12 +18,16 @@ services:
     volumes:
       - /root/.openclaude-creds:/app/.openclaude-creds:ro
       - /root/.codex-creds:/app/.codex-creds:ro
-      - /root/.openclaude/projects/-root/memory:/app/.openclaude/projects/-app/memory:ro
+      - /root/maximus-telegram/memory:/app/.openclaude/projects/-app/memory:ro
+      - /root/.openclaude/plugins:/app/.openclaude/plugins
       - /root/maximus-data:/app/data
       - /root/maximus-sessions:/app/.claude
       - /var/run/docker.sock:/var/run/docker.sock
       - /root/agents:/host-agents
-      - /root/.openclaude/plugins:/app/.openclaude/plugins
+      - /root:/host-root
+      - /root/agents/skills:/app/skills
+      - /root/maximus-telegram/CLAUDE.md:/app/CLAUDE.md:ro
+      - /root/maximus-telegram/bot.js:/app/bot.js:ro
     tmpfs:
       - /app/tmp:uid=999,gid=999
     extra_hosts:
